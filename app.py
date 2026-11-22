@@ -1,5 +1,5 @@
 # StreamClipper — локальный сервер + интерфейс в браузере.
-import io, json, mimetypes, os, secrets, shutil, socket, subprocess, sys, threading, time, urllib.request, uuid, webbrowser, zipfile
+import io, json, re, mimetypes, os, secrets, shutil, socket, subprocess, sys, threading, time, urllib.request, uuid, webbrowser, zipfile
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -90,12 +90,15 @@ def library():
     out = []
     if C.OUT_ROOT.exists():
         for d in sorted(C.OUT_ROOT.iterdir(), reverse=True):
-            res = C.jload(d / "results.json") if d.is_dir() else None
-            if res:
-                meta = C.jload(d / "meta.json", {}) or {}
+            if not d.is_dir(): continue
+            res = C.jload(d / "results.json") or []
+            meta = C.jload(d / "meta.json", {}) or {}
+            comp = meta.get("compilation") or (str(d / "out" / "compilation_16x9.mp4") if (d / "out" / "compilation_16x9.mp4").exists() else None)
+            if res or comp:
                 out.append({"dir": str(d), "title": (meta.get("info") or {}).get("title") or d.name, "src_dur": meta.get("duration") or 0,
                             "uploader": meta.get("uploader", ""), "results": res, "sources_deleted": bool(meta.get("sources_deleted")),
-                            "sources_bytes": sum(f.stat().st_size for f in C.source_files(d))})
+                            "sources_bytes": sum(f.stat().st_size for f in C.source_files(d)),
+                            "compilation": comp, "compilation_dur": meta.get("compilation_dur")})
     return out[:40]
 
 
@@ -151,6 +154,7 @@ def qr_svg(text):
         return None
 
 
+THUMBS = {}
 FAVICON = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect x="8" y="2" width="16" height="28" rx="4" fill="#ededed"/>'
            b'<rect x="11" y="18" width="10" height="4" rx="1" fill="#ffe500"/></svg>')
 
@@ -220,8 +224,23 @@ class H(BaseHTTPRequestHandler):
             if u.path == "/file":
                 return self.file((q.get("p") or [""])[0], bool(q.get("dl")))
             if u.path == "/thumb":
-                with urllib.request.urlopen(urllib.request.Request((q.get("u") or [""])[0], headers={"User-Agent": "Mozilla/5.0"}), timeout=20, context=C.ssl_ctx()) as r:
-                    return self.send(200, r.read(), r.headers.get("Content-Type", "image/jpeg"), {"Cache-Control": "max-age=86400"})
+                src = (q.get("u") or [""])[0]
+                if not src.startswith(("http://", "https://")): return self.send(404, {"error": "no thumb"})
+                if src in THUMBS: return self.send(200, THUMBS[src][0], THUMBS[src][1], {"Cache-Control": "max-age=86400"})
+                tries = [src]
+                m = re.search(r"ytimg\.com/vi(?:_webp)?/([\w-]{6,})/", src)
+                if m:  # maxresdefault є не в кожного відео — запасні варіанти YouTube
+                    tries += [f"https://i.ytimg.com/vi/{m.group(1)}/{n}.jpg" for n in ("maxresdefault", "sddefault", "hqdefault", "mqdefault")]
+                for t_ in tries:
+                    try:
+                        with urllib.request.urlopen(urllib.request.Request(t_, headers={"User-Agent": "Mozilla/5.0"}), timeout=15, context=C.ssl_ctx()) as r:
+                            data, ct = r.read(), r.headers.get("Content-Type", "image/jpeg")
+                        if len(THUMBS) > 300: THUMBS.clear()
+                        THUMBS[src] = (data, ct)
+                        return self.send(200, data, ct, {"Cache-Control": "max-age=86400"})
+                    except Exception:
+                        continue
+                return self.send(404, {"error": "no thumb"})
             self.send(404, {"error": "not found"})
         except ConnectionError:
             pass

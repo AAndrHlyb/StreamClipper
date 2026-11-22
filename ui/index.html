@@ -36,6 +36,7 @@
     <button data-tab="cut"><svg class="i"><use href="#scissors"/></svg><span data-t="tab_cut"></span></button><button data-tab="channels"><svg class="i"><use href="#tv"/></svg><span data-t="tab_channels"></span></button><button data-tab="queue"><svg class="i"><use href="#list"/></svg><span data-t="tab_queue"></span></button><button data-tab="lib"><svg class="i"><use href="#film"/></svg><span data-t="tab_lib"></span></button><button data-tab="set"><svg class="i"><use href="#sliders"/></svg><span data-t="tab_set"></span></button>
   </nav>
   <div class="sp"></div>
+  <button class="ghost updb hide" id="updb" onclick="tab('set');updCheck()"><span class="dot" style="background:var(--acc)"></span><span data-t="upd_badge"></span></button>
   <div class="status"><span class="dot" id="hd"></span><span id="hc"></span></div>
   <button class="ghost hfold" onclick="api('/api/open',{})"><svg class="i"><use href="#folder"/></svg><span data-t="folder"></span></button>
 </header>
@@ -89,8 +90,8 @@
       </div>
     </div>
     <div class="grid">
-      <label class="f"><span data-t="mode"></span>
-        <div class="seg" id="mode"><button data-v="best" data-t="m_best"></button><button data-v="seq" data-t="m_seq"></button></div>
+      <label class="f fmode"><span data-t="mode"></span>
+        <div class="seg" id="mode"><button data-v="best" data-t="m_best"></button><button data-v="seq" data-t="m_seq"></button><button data-v="compile" id="mcomp" data-t="m_compile"></button></div>
       </label>
       <label class="f"><span data-t="len"></span>
         <div class="pair"><input type="number" id="mn" value="60" min="10" max="600"><span class="hint" data-t="to"></span><input type="number" id="mx" value="90" min="10" max="600">
@@ -129,7 +130,7 @@
         </div>
       </div>
       <div>
-        <div class="phone"><canvas id="pc" width="540" height="960"></canvas></div>
+        <div class="phone" id="phonebox"><canvas id="pc" width="540" height="960"></canvas></div>
         <div class="hint cap" data-t="looks"></div>
       </div>
     </div>
@@ -146,7 +147,6 @@
         <label class="x"><input type="checkbox" id="x_wm"><i></i><div><b data-t="x_wm"></b><span data-t="x_wm_d"></span></div></label>
         <label class="x"><input type="checkbox" id="x_cover"><i></i><div><b data-t="x_cover"></b><span data-t="x_cover_d"></span></div></label>
         <label class="x"><input type="checkbox" id="x_denoise"><i></i><div><b data-t="x_denoise"></b><span data-t="x_denoise_d"></span></div></label>
-        <label class="x"><input type="checkbox" id="x_compile"><i></i><div><b data-t="x_compile"></b><span data-t="x_compile_d"></span></div></label>
         <label class="x"><input type="checkbox" id="x_vclips"><i></i><div><b data-t="x_vclips"></b><span data-t="x_vclips_d"></span></div></label>
         <label class="x"><input type="checkbox" id="x_hist"><i></i><div><b data-t="x_hist"></b><span data-t="x_hist_d"></span></div></label>
         <label class="x"><input type="checkbox" id="x_gpu"><i></i><div><b data-t="x_gpu"></b><span class="tc" id="gpuname"></span></div></label>
@@ -178,9 +178,10 @@
 
   <section class="hide" id="s4">
     <div class="sh"><span class="n">06</span><h2><span data-t="ready"></span> <span class="hint" id="rc"></span></h2><div class="sp"></div>
-      <a class="btn ghost hide" id="complink" target="_blank"><span data-t="compile_ready"></span></a>
       <button class="ghost" onclick="api('/api/open',{path:cur.dir+'/out'})"><svg class="i"><use href="#folder"/></svg><span data-t="open_dir"></span></button></div>
     <div class="tl" id="tl"></div>
+    <div class="comp hide" id="compbox"><video controls preload="metadata" id="compv"></video>
+      <div class="row mt12"><b data-t="m_compile"></b><span class="tc" id="compd"></span><div class="sp"></div><a class="btn ghost" id="compdl"><svg class="i"><use href="#dl"/></svg><span data-t="download"></span></a></div></div>
     <div class="res" id="res"></div>
     <div class="hint mt16"><span data-t="captions_note"></span>. <span data-t="rate_note"></span></div>
     <div class="after hide" id="after">

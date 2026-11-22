@@ -244,6 +244,7 @@ def compilation(d, meta, clips, o, job, max_min=8):
     parts = []
     for i, c in enumerate(pick, 1):
         job.check(); job.sub = f"{i}/{len(pick)}"
+        if job.stage == "compile": job.pct = max(job.pct, 70 + 28 * (i - 1) / len(pick))
         r = render_clip(d, meta, {**c, "title": ""}, {**o, "cover": False}, job, 900 + i, lay="land",
                         out_name=f"_part{i:02d}.mp4", hook=False, zoom=False)
         parts.append(Path(r["file"])); Path(r["preview"]).unlink(missing_ok=True)

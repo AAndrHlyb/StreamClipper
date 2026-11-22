@@ -59,7 +59,7 @@ class Job:
 DEFAULTS = {"mode": "auto", "min_len": 60, "max_len": 90, "max_clips": 40, "min_score": 2.0, "layout": "blur", "cam": None,
             "subs": True, "model": None, "lang": None, "live_minutes": 0, "skip_start": 180, "seq_limit": 0,
             "speech_filter": True, "review": False, "censor": False, "censor_mode": "beep", "sub_style": {},
-            "hook": False, "zoom": False, "watermark": False, "cover": False, "denoise": False, "compile": False,
+            "hook": False, "zoom": False, "watermark": False, "cover": False, "denoise": False, "compile": False, "compile_min": 8,
             "vclips": False, "keywords": [], "history": None, "gpu": None, "live_every": 8}
 
 
@@ -141,7 +141,7 @@ def _run(job):
     chat_f = None
     if info["platform"] != "file":
         full = info["platform"] not in ("twitch",) or mode == "seq"
-        if mode == "best" and info.get("duration"):
+        if mode in ("best", "compile") and info.get("duration"):
             # чат качається одночасно зі звуком/відео — вони не залежать одне від одного
             chat_f = _POOL.submit(_chat, job, d, meta, info, 0, info["duration"], o, True)
         _download(job, d, meta, info["url"], full, 0, None, 2, 30)
@@ -149,7 +149,10 @@ def _run(job):
     jsave(d / "meta.json", meta)
     n = meta["duration"]
     # 2) выбор
-    if mode == "best":
+    if mode == "compile":  # один горизонтальний ролик 16:9 заданої довжини з найкращих моментів
+        target = max(1.0, float(o.get("compile_min") or 8)) * 60
+        o["max_clips"] = int(math.ceil(target / ((o["min_len"] + o["max_len"]) / 2) * 1.6)) + 2
+    if mode in ("best", "compile"):
         if chat_f:
             if not chat_f.done(): job.step("download_chat", job.pct)
             chat = chat_f.result()
@@ -159,7 +162,22 @@ def _run(job):
     else:
         clips = _sequential(job, meta, o, n)
     clips = _review(job, clips)
+    if mode == "compile":
+        return _compile_only(job, d, meta, o, clips)
     _render_all(job, d, meta, o, clips)
+
+
+def _compile_only(job, d, meta, o, clips):
+    if not clips: job.log("no_more"); return
+    for k, c in enumerate(clips, 1): c["k"] = k
+    jsave(d / "clips.json", [{k: v for k, v in c.items() if k != "_ws"} for c in clips])
+    job.step("compile", 70)
+    p = compilation(d, meta, clips, o, job, max_min=float(o.get("compile_min") or 8))
+    if not p: raise RuntimeError("compile_err")
+    job.extra["compilation"] = p; job.extra["compilation_dur"] = round(dur_of(p))
+    meta["compilation"] = p; meta["compilation_dur"] = job.extra["compilation_dur"]; jsave(d / "meta.json", meta)
+    if o["history"]: history_add(meta["uploader"], meta["vid"], clips)
+    shutil.rmtree(d / "out" / "_w", ignore_errors=True); shutil.rmtree(d / "raw", ignore_errors=True)
 
 
 def _download(job, d, meta, url, full, a, b, p0, p1):
