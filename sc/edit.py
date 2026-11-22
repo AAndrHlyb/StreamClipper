@@ -12,6 +12,7 @@ from .core import APP_DIR, ffmpeg, run_proc, perf
 from . import analysis as A
 from .render import segment, _cv2
 from .core import src_fps
+from . import edit_fx as FX
 
 W, H, FPS = 1080, 1920, 30
 FONT_BIG = APP_DIR / "fonts" / "Anton-Regular.ttf"
@@ -211,7 +212,29 @@ def delogo_vf(src, boxes):
     return ",".join(out)
 
 
+YUNET = APP_DIR / "models" / "face_detection_yunet_2023mar.onnx"
+
+
+def _yunet(img):
+    """YuNet (OpenCV Zoo) — набагато точніший за Haar: профіль, окуляри, погане світло."""
+    cv2 = _cv2()
+    if "y" not in _CASC:
+        try: _CASC["y"] = cv2.FaceDetectorYN.create(str(YUNET), "", (320, 320), 0.6, 0.3, 50) if YUNET.exists() else None
+        except Exception: _CASC["y"] = None
+    det = _CASC["y"]
+    if det is None: return None
+    h, w = img.shape[:2]; det.setInputSize((w, h))
+    _, f = det.detect(img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR))
+    return [] if f is None else [tuple(int(v) for v in r[:4]) for r in f]
+
+
 def _faces(img):
+    y = _yunet(img)
+    if y is not None: return y
+    return _faces_haar(img)
+
+
+def _faces_haar(img):
     cv2 = _cv2()
     if "f" not in _CASC: _CASC["f"] = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     g = cv2.equalizeHist(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
@@ -340,7 +363,7 @@ def scan_video(src, dur, skip=(), job=None):
         if job is not None: job.check()
         img = np.frombuffer(buf, np.uint8).reshape(h, w, 3)
         g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        fs = _faces_small(g)
+        fs = _faces_small(g, img)
         face = max((f[2] * f[3] for f in fs), default=0) / (w * h)
         sharp = float(cv2.Laplacian(g, cv2.CV_32F).var())
         sat = float(cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[..., 1].mean())
@@ -360,14 +383,17 @@ def scan_video(src, dur, skip=(), job=None):
     return out
 
 
-def _faces_small(g):
+def _faces_small(g, img=None):
     cv2 = _cv2()
+    if img is not None:
+        y = _yunet(img)
+        if y is not None: return y
     if "f" not in _CASC: _CASC["f"] = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     return list(_CASC["f"].detectMultiScale(cv2.equalizeHist(g), 1.1, 4, minSize=(14, 14)))
 
 
 # ------------------------------------------------------------------ план кадрів
-def plan_shots(m, L, pool, rnd, video_pool=None):
+def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
     """Склейки в біт за драматургією: вступ (довші кадри) → розгін → кульмінація на дропі (кожна доля) → фінал.
     Переходи: 2–3 фірмові на весь ролик; спалах — лише на найсильніших піках."""
     beats = [b for b in m["beats"] if 0.05 < b < L - 0.15]
@@ -383,8 +409,9 @@ def plan_shots(m, L, pool, rnd, video_pool=None):
         if b - cuts[-1] >= need - 0.03 or b - cuts[-1] > 1.6: cuts.append(b)
     cuts.append(L)
     n = len(cuts) - 1
-    sigs = {"punch": "zoom", "whip": "whip", "glitch": "glitch"}
-    sig = rnd.choice(list(sigs))
+    style = style or FX.STYLES["hype"]
+    tr = style["trans"][:]; rnd.shuffle(tr); sig_a, sig_b = tr[0], (tr[1] if len(tr) > 1 else tr[0])  # 2 фірмові переходи на ролик
+    max_flash = style.get("flash", 3)
     strengths = m["strength"]; thr = sorted(strengths)[int(len(strengths) * 0.85)] if strengths else 1
     # вибір моментів: найкращі з відстанню між ними → у хронологічному порядку (історія), найсильніший — на дроп
     picks = []
@@ -397,6 +424,7 @@ def plan_shots(m, L, pool, rnd, video_pool=None):
         picks = sorted([p for p in picks if p is not best], key=lambda x: x["t"])
         di = min(range(n), key=lambda i: abs(cuts[i] - drop))
         picks.insert(min(di, len(picks)), best)
+        while len(picks) < n: picks.append(dict(rnd.choice(video_pool)))  # мало кадрів у джерелі — повтори в кінці
     flashes = 0; shots = []
     for i in range(n):
         a, b = cuts[i], cuts[i + 1]; d = b - a
@@ -410,17 +438,22 @@ def plan_shots(m, L, pool, rnd, video_pool=None):
         elif a > drop and d >= 0.5 and rnd.random() < 0.35: speed, ramp = 1.7, rnd.choice(["in", "out"])
         else: speed, ramp = (0.85 if a < drop else 1.15), "none"
         if i == 0: fx = "none"
-        elif is_drop and flashes < 3: fx, flashes = "flash", flashes + 1
-        elif st >= thr and flashes < 3 and a > drop: fx, flashes = "flash", flashes + 1
-        elif st >= thr * 0.8 or (i % 4 == 0): fx = sigs[sig]
+        elif is_drop and flashes < max_flash: fx, flashes = "flash", flashes + 1
+        elif st >= thr and flashes < max_flash and a > drop: fx, flashes = "flash", flashes + 1
+        elif st >= thr * 0.8: fx = sig_a
+        elif i % 4 == 0: fx = sig_b
         else: fx = "cut"
+        prev_look = shots[-1]["look"] if shots else None
+        look = rnd.choice(style["looks"]) if (rnd.random() < 0.5 or (is_drop and a > 0)) else None
+        if look == prev_look: look = None
+        cut_in = (d >= 0.55 and i > 0 and fx in ("cut", "none", sig_b) and rnd.random() < style.get("cutout", 0.3))
         if video_pool:
             k, t = -1, max(0.0, picks[i]["t"] - 0.15)
         else:
             ranked = sorted(range(len(pool)), key=lambda j: -pool[j].get("final", 0))
             k = ranked[(0 if is_drop else i) % len(ranked)]; t = pool[k]["peak"] + rnd.uniform(-3, 2)
         shots.append({"a": a, "b": b, "k": k, "t": t, "speed": speed, "ramp": ramp, "hard": st >= thr, "drop": is_drop,
-                      "fx": fx, "resolve": a >= resolve - 0.01})
+                      "fx": fx, "resolve": a >= resolve - 0.01, "look": look, "cutin": cut_in, "dir": rnd.choice([-1, 1])})
     return shots
 
 
@@ -601,12 +634,14 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
         blend(frame, warp(spr, pulse), W / 2, H * 0.36, None, False, fade)
 
 
-def style_events(ev, rnd, behind_ok):
+def style_events(ev, rnd, behind_ok, prefer=None):
     pool = (["behind", "behind", "slam", "slam", "stack", "orbit", "orbit", "pop", "split", "wipe", "side", "cascade", "rgb"] if behind_ok
             else ["slam", "slam", "stack", "split", "wipe", "cascade", "rgb", "pop", "behind"])
     last = []
     for k, e in enumerate(ev):
-        opts = [x for x in pool if x not in last[-2:]] or pool
+        src = prefer if (prefer and rnd.random() < 0.65) else pool
+        if not behind_ok: src = [x for x in src if x not in ("orbit", "side")] or pool
+        opts = [x for x in src if x not in last[-2:]] or src
         s = rnd.choice(opts)
         if s in ("orbit", "cascade") and len(e["txt"]) > 9: s = "behind"
         if len(e["txt"].split()) >= 2 and rnd.random() < 0.5: s = "waterfall"
@@ -681,7 +716,12 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
         for v in vpool:  # моменти, де щось відбувається за звуком/чатом, — трохи вище
             if any(abs(v["t"] - c["peak"]) < 4 for c in pool if c.get("final", 0) > 0.5): v["score"] += 0.6
         if len(vpool) < 8: vpool = None
-    shots = plan_shots(m, L, pool, rnd, vpool)
+    sname = o.get("edit_style") if o.get("edit_style") in FX.STYLES else rnd.choice(list(FX.STYLES))
+    style = FX.STYLES[sname]
+    o = dict(o)
+    if (o.get("edit_grade") or "auto") == "auto": o["edit_grade"] = rnd.choice(style["grade"])
+    job.log("edit_style", sname)
+    shots = plan_shots(m, L, pool, rnd, vpool, style)
     # ---- текст
     tm = o.get("edit_textmode") or "lyrics"
     ev = []
@@ -742,7 +782,7 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     job.step("edit_fx", 78)
     seg = Segmenter() if o.get("edit_behind", True) else None
     behind_ok = seg is not None and seg.net is not None
-    ev = style_events(ev, rnd, behind_ok)
+    ev = style_events(ev, rnd, behind_ok, style.get("text"))
     out = d / "out" / name
     eargs = ["-c:v", "libx264", "-preset", "medium", "-crf", "15", "-tune", "film", "-profile:v", "high", "-level", "4.2",
              "-maxrate", "30M", "-bufsize", "60M", "-pix_fmt", "yuv420p", "-x264-params", "aq-mode=3"]
@@ -765,7 +805,8 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
             pd = subprocess.Popen([ffmpeg(), "-v", "error", "-i", pr["file"], "-f", "rawvideo", "-pix_fmt", "bgr24", "-"], stdout=subprocess.PIPE)
             if seg: seg.reset()
             nxt = shots[i + 1] if i + 1 < len(shots) else None
-            leak = leak_layer(rnd) if rnd.random() < 0.3 else None
+            leak = leak_layer(rnd) if rnd.random() < 0.2 else None
+            sst = {}; ev_acc = ACCENTS[i % len(ACCENTS)]
             cur_idx, cur = -1, None
             for j in range(pr["n"]):
                 want = ramp_index(j, pr["n"], pr["nsrc"], sh["ramp"]) if sh["ramp"] != "none" else j
@@ -803,12 +844,24 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 if blur > 0.01: fr = zoom_blur(fr, blur)
                 if hblur: fr = cv2.blur(fr, (hblur | 1, 1))
                 if (fx == "glitch" and j < 3) or (nfx == "glitch" and tail < 2): fr = glitch(fr, rnd, 0.9 if j < 3 else 0.6)
+                if nfx == "pixel" and tail < 3: fr = FX.tr_pixel(fr, (3 - tail) / 3)
+                if fx == "pixel" and j < 3: fr = FX.tr_pixel(fr, 1 - j / 3)
+                if nfx == "spin" and tail < 3: fr = FX.tr_spin(fr, (3 - tail) / 3, 1)
+                if fx == "spin" and j < 3: fr = FX.tr_spin(fr, 1 - j / 3, -1)
+                if fx == "iris" and j < 6: fr = FX.tr_iris(prev, fr, (j + 1) / 6)
+                if fx == "shutter" and j < 6: fr = FX.tr_shutter(prev, fr, (j + 1) / 6)
                 if leak is not None:
                     a = 0.32 * (0.5 + 0.5 * math.sin(t * 3 + i))
                     fr = np.clip(fr.astype(np.float32) + leak * a, 0, 255).astype(np.uint8)
                 # ---- людина і текст
                 mask = seg(fr) if seg else None
                 head = head_of(mask) if mask is not None else None
+                lt = j / FPS; dshot = pr["n"] / FPS
+                if sh.get("look"):
+                    try: fr = FX.LOOKS[sh["look"]](fr, mask if head else None, head, lt, dshot, sst, ev_acc)
+                    except Exception: pass
+                if sh.get("cutin") and head is not None and lt < 0.5:
+                    fr = FX.cutout_enter(fr, mask, lt, sst, sh.get("dir", 1))
                 for e in ev:
                     if e["t0"] <= t < e["t1"]: draw_text(fr, e, t, mask if head else None, head, rc, bp)
                 if wm is not None and t < T - 0.9: blend(fr, wm, W / 2, H * 0.80, None, False, 0.92)
