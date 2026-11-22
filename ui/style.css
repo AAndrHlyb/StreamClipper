@@ -14,6 +14,7 @@ header{height:56px;display:flex;align-items:center;gap:16px;padding:0 24px;borde
 .brand svg{width:14px;height:22px}
 nav{display:flex;gap:4px;margin-left:16px}
 nav button{height:32px;border:0;background:transparent;color:var(--t2);padding:0 12px;border-radius:8px;font-weight:500}
+nav button svg{display:none}
 nav button:hover{background:var(--raised);color:var(--t1)}
 nav button.on{background:var(--raised);color:var(--t1);box-shadow:inset 0 -2px 0 var(--acc)}
 .status{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--t3)}
@@ -168,5 +169,77 @@ pre.log{background:var(--deep);border:1px solid var(--line);border-radius:8px;pa
 .qrt{flex:1;min-width:220px;display:flex;flex-direction:column;gap:6px}
 .qrt .tc{word-break:break-all;color:var(--t1)}
 .hint.warn{color:#f0b43c}
-@media (max-width:860px){main{padding:16px}.info,.lay{grid-template-columns:1fr}.phone{margin:auto}header{padding:0 12px;gap:8px;flex-wrap:wrap;height:auto;min-height:56px}nav{margin:0;overflow:auto}.status{display:none}.v .ty{display:none}.rv{grid-template-columns:auto 1fr}.rv .ctl{grid-column:1/-1;flex-wrap:wrap}}
+@media (max-width:860px){main{padding:24px 16px}.info,.lay{grid-template-columns:1fr}.phone{margin:auto}.v .ty{display:none}.rv{grid-template-columns:auto 1fr}.rv .ctl{grid-column:1/-1;flex-wrap:wrap}}
+/* ---------- телефон: нижня панель вкладок, одна колонка, великі цілі для пальця ---------- */
+@media (max-width:700px){
+  body{padding-bottom:calc(72px + env(safe-area-inset-bottom))}
+  header{height:52px;padding:0 16px;gap:12px}
+  .status{display:flex}.status span:last-child{display:none}
+  .hfold span{display:none}.hfold{width:40px;padding:0;justify-content:center}
+  nav{position:fixed;left:0;right:0;bottom:0;margin:0;z-index:6;display:grid;grid-template-columns:repeat(5,1fr);gap:0;
+      background:rgba(15,15,16,.96);border-top:1px solid var(--line);padding:6px 4px calc(6px + env(safe-area-inset-bottom));backdrop-filter:blur(12px)}
+  nav button{height:52px;flex-direction:column;justify-content:center;gap:4px;padding:0 2px;font-size:11px;line-height:12px;border-radius:10px;color:var(--t3)}
+  nav button svg{display:block;width:20px;height:20px}
+  nav button span{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  nav button:hover{background:transparent}
+  nav button.on{background:transparent;box-shadow:none;color:var(--t1)}
+  nav button.on svg{color:var(--acc)}
+  main{padding:20px 12px}
+  h1{font-size:22px;line-height:28px}
+  .lead{font-size:14px;margin-bottom:16px}
+  section{padding:16px;border-radius:12px;margin-bottom:12px}
+  .sh{margin-bottom:12px}
+  input[type=text],input[type=number],select,textarea{font-size:16px;height:44px}
+  #url{min-width:0;width:100%;flex:1 1 100%;height:48px}
+  #pbtn,#go{width:100%;justify-content:center}
+  button,.btn{min-height:40px}
+  .seg{display:flex;width:100%;max-width:100%;overflow-x:auto;scrollbar-width:none}
+  .seg::-webkit-scrollbar{display:none}
+  .seg button{flex:1 0 auto;height:36px;padding:0 10px;justify-content:center}
+  .est{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .est .f{font-size:17px;line-height:24px;white-space:nowrap}
+  .grid,.grid2{grid-template-columns:minmax(0,1fr);gap:16px}
+  .grid{margin-top:16px;padding-top:16px}
+  .pair input{width:72px}
+  .lay{gap:16px;margin-top:16px;padding-top:16px}
+  .lay>*{min-width:0}
+  .phone{width:204px;padding:8px;border-radius:26px}
+  .phone canvas{width:188px;height:334px;border-radius:18px}
+  .extras{margin-top:16px;padding-top:16px}
+  .extras summary{flex-wrap:wrap;row-gap:4px;align-items:center}
+  .extras summary .hint{flex:1 1 100%;padding-left:16px;order:2}
+  .info{display:block}
+  .info .thumb{float:left;width:120px;margin:0 12px 8px 0}
+  ul.plan{clear:both;padding-top:8px}
+  .sub{flex-wrap:wrap;gap:4px 12px}
+  .ttl{font-size:15px;line-height:20px}
+  .xgrid{grid-template-columns:minmax(0,1fr)}
+  .go-row{margin-top:16px;padding-top:16px}
+  .go-row>*{flex:1 1 100%;justify-content:center}
+  .v{height:64px;gap:10px;padding:0 8px}
+  .v img,.v .ph{width:80px;height:45px}
+  .v .meta{gap:8px;flex-wrap:wrap}
+  .rv .ctl input[type=number]{width:88px;height:40px}
+  .rv .ctl input[type=text]{width:100%;flex:1 1 100%;height:40px}
+  .res{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .clip{border-radius:10px}
+  .clip .m{padding:8px;gap:6px}
+  .clip .tx{display:none}
+  .clip input{height:40px;font-size:14px}
+  .clip button{height:36px}
+  .clip .ic{width:34px;height:34px;min-height:34px}
+  .clip .h .row{flex-wrap:nowrap;gap:2px}
+  .tl{margin-bottom:16px}
+  .wgrid{grid-template-columns:minmax(0,1fr)}
+  .sets{padding:0 16px}
+  .srow{flex-wrap:wrap;gap:12px;padding:14px 0}
+  .srow>:first-child{flex:1 1 180px;min-width:0}
+  .srow>.seg,.srow>select{flex:1 1 100%}
+  .srow>input[type=number]{width:96px!important}
+  .qr{justify-content:center}
+  .qrimg{width:min(260px,100%);height:auto;aspect-ratio:1}
+  .qrt{min-width:0;flex:1 1 100%}
+  .lib .it{gap:10px;padding:8px}
+  .onair{flex-wrap:wrap}
+}
 .av.ini{display:grid;place-items:center;font-weight:500;color:var(--t2)}
