@@ -1,5 +1,5 @@
 """Сценарии: запись/VOD, лайв-нарезка, проверка кандидатов, ещё N клипов, очистка, история."""
-import json, math, re, shutil, subprocess, threading, time
+import json, math, os, re, shutil, subprocess, threading, time
 from pathlib import Path
 
 from .core import (perf, OUT_ROOT, YTDLP, Cancelled, capture, dur_of, enforce_disk_limit, ffmpeg, hms, jload, jsave, notify,
@@ -116,6 +116,22 @@ def run_job(job):
             except Exception: pass
 
 
+def _find_sources(info, full):
+    """Чи вже качали цей запис: попередня папка з тим самим відео, де вихідники ще на місці. -> dict або None."""
+    vid = str(info.get("video_id") or info.get("url") or "")
+    if not vid or info.get("platform") == "file": return None
+    for md in sorted(OUT_ROOT.glob("*/meta.json"), reverse=True):
+        m = jload(md, {}) or {}
+        if str(m.get("vid")) != vid or m.get("sources_deleted"): continue
+        a, v = m.get("audio"), m.get("video")
+        if not a or not Path(a).exists(): continue
+        if full and not (v and Path(v).exists()): continue
+        chat = md.parent / "chat.jsonl"
+        return {"audio": a, "video": v if v and Path(v).exists() else None, "dir": str(md.parent),
+                "chat": str(chat) if chat.exists() and chat.stat().st_size > 0 else None}
+    return None
+
+
 def _new_dir(info):
     name = slug(f"{info.get('uploader') or ''}_{info.get('title') or ''}", 50)
     d = OUT_ROOT / f"{time.strftime('%Y%m%d_%H%M%S')}_{name}"; (d / "out").mkdir(parents=True, exist_ok=True)
@@ -142,10 +158,22 @@ def _run(job):
     chat_f = None
     if info["platform"] != "file":
         full = info["platform"] not in ("twitch",) or mode == "seq"
+        prev = _find_sources(info, full)
+        if prev and prev.get("chat"): meta["_reuse_chat"] = prev["chat"]
         if mode in ("best", "compile", "teaser", "edit") and info.get("duration"):
             # чат качається одночасно зі звуком/відео — вони не залежать одне від одного
             chat_f = _POOL.submit(_chat, job, d, meta, info, 0, info["duration"], o, True)
-        _download(job, d, meta, info["url"], full, 0, None, 2, 30)
+        if prev:  # уже скачано раніше — беремо звідти, не качаємо вдруге
+            meta["audio"] = prev["audio"]
+            if prev["video"]: meta["video"] = prev["video"]
+            meta["reused_from"] = prev["dir"]
+            try: os.utime(prev["dir"])  # свіжа дата — ліміт місця не видалить її першою
+            except OSError: pass
+            vs = Path(prev["dir"]) / "vscan.json"
+            if vs.exists(): shutil.copy(vs, d / "vscan.json")
+            job.log("reuse_src", Path(prev["dir"]).name)
+        else:
+            _download(job, d, meta, info["url"], full, 0, None, 2, 30)
         meta["duration"] = info.get("duration") or dur_of(meta["audio"])
     jsave(d / "meta.json", meta)
     n = meta["duration"]
@@ -291,6 +319,11 @@ def _download(job, d, meta, url, full, a, b, p0, p1):
 
 def _chat(job, d, meta, info, a, b, o, background=False):
     rows = []
+    old = meta.get("_reuse_chat")
+    if old and a == 0 and Path(old).exists():  # чат цього запису вже качали раніше
+        rows = [json.loads(x) for x in Path(old).read_text(encoding="utf-8").splitlines() if x.strip()]
+        shutil.copy(old, d / "chat.jsonl"); job.log("reuse_chat", len(rows))
+        return rows
     if info["platform"] == "twitch" and info.get("video_id"):
         if not background: job.step("download_chat", job.pct)
         rows = S.twitch_chat(info["video_id"], a, b, job)

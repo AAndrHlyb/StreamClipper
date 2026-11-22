@@ -278,8 +278,12 @@ def enforce_disk_limit(keep=None):
     if not lim or not OUT_ROOT.exists(): return 0
     dirs = sorted([d for d in OUT_ROOT.iterdir() if d.is_dir() and not d.name.startswith("_")], key=lambda d: d.stat().st_mtime)
     total = sum(dir_size(d) for d in dirs); freed = 0
+    prot = set()
+    if keep:  # поточна папка і та, з якої вона позичила вихідники
+        prot.add(Path(keep)); rf = (jload(Path(keep) / "meta.json", {}) or {}).get("reused_from")
+        if rf: prot.add(Path(rf))
     for d in dirs:
         if total <= lim * 2**30: break
-        if keep and Path(d) == Path(keep): continue
+        if Path(d) in prot: continue
         n = delete_sources(d); total -= n; freed += n
     return freed
