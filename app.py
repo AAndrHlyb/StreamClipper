@@ -94,15 +94,12 @@ def update_apply():
         data = r.read()
     z = zipfile.ZipFile(io.BytesIO(data))
     names = z.namelist(); root = os.path.commonprefix(names).split("/")[0] + "/" if all("/" in n for n in names) else ""
-    old_req = (C.APP_DIR / "requirements.txt").read_text() if (C.APP_DIR / "requirements.txt").exists() else ""
     for n in names:
         rel = n[len(root):] if n.startswith(root) else n
         if not rel or rel.endswith("/") or rel.startswith(".venv"): continue
         dst = C.APP_DIR / rel; dst.parent.mkdir(parents=True, exist_ok=True)
         with z.open(n) as src, open(dst, "wb") as f: shutil.copyfileobj(src, f)
         if rel.endswith(".command"): os.chmod(dst, 0o755)
-    if (C.APP_DIR / "requirements.txt").read_text() != old_req:
-        (C.APP_DIR / ".venv" / "deps_ok.txt").unlink(missing_ok=True)
     threading.Thread(target=restart, daemon=True).start()
     return info
 

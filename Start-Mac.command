@@ -15,10 +15,11 @@ if [ ! -x .venv/bin/python ]; then
   echo "Перший запуск: готую програму (3-5 хвилин, потрібен інтернет)..."
   "$PY" -m venv .venv || { echo "Не вдалося створити середовище Python"; pause_exit; }
 fi
-if [ ! -f .venv/deps_ok.txt ]; then
+if ! cmp -s requirements.txt .venv/deps_ok.txt; then
+  echo "Встановлюю бібліотеки (кілька хвилин)..."
   .venv/bin/python -m pip install --disable-pip-version-check -q -U pip
   .venv/bin/python -m pip install --disable-pip-version-check -q -r requirements.txt || { echo "Не вдалося встановити бібліотеки. Перевір інтернет і запусти ще раз."; pause_exit; }
-  echo ok > .venv/deps_ok.txt
+  cp requirements.txt .venv/deps_ok.txt
 else
   .venv/bin/python -m pip install --disable-pip-version-check -q -U yt-dlp
 fi
