@@ -164,6 +164,17 @@ _M = {}
 _MLOCK = __import__("threading").Lock()
 
 
+def _model_cached(name):
+    """Чи модель уже лежить у кеші Hugging Face (тоді вантажимо з диска, без мережі)."""
+    try:
+        from faster_whisper.utils import _MODELS
+        from huggingface_hub import try_to_load_from_cache
+        r = try_to_load_from_cache(_MODELS.get(name, name), "model.bin")
+        return isinstance(r, str) and os.path.exists(r)
+    except Exception:
+        return False
+
+
 def whisper(o, job):
     pf = perf(); key = f'{o["model"]}|{pf["asr"]}|{pf["asr_threads"]}'  # зміна швидкості в налаштуваннях — нова модель
     with _MLOCK:  # паралельні потоки не повинні вантажити модель двічі
@@ -172,11 +183,15 @@ def whisper(o, job):
             except Exception:  # Smart App Control может блокировать PyAV — он не нужен
                 for k in [k for k in sys.modules if k == "av" or k.startswith("av.")]: del sys.modules[k]
                 sys.modules["av"] = types.ModuleType("av")
-            job.log("model", o["model"])
             from faster_whisper import WhisperModel
+            cached = _model_cached(o["model"])
+            job.log("model_load" if cached else "model", o["model"])  # з диска — без «скачування»
             for k in [k for k in _M if "|" in k]: del _M[k]  # стара модель звільняє пам'ять
-            _M[key] = WhisperModel(o["model"], device=os.environ.get("SC_DEVICE", "cpu"), compute_type="int8",
-                                   cpu_threads=pf["asr_threads"], num_workers=pf["asr"])
+            kw = dict(device=os.environ.get("SC_DEVICE", "cpu"), compute_type="int8", cpu_threads=pf["asr_threads"], num_workers=pf["asr"])
+            try:
+                _M[key] = WhisperModel(o["model"], local_files_only=cached, **kw)  # уже скачана — навіть не питаємо інтернет
+            except Exception:
+                _M[key] = WhisperModel(o["model"], **kw)
         return _M[key]
 
 

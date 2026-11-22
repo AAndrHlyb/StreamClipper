@@ -68,7 +68,7 @@ uk: {
   prep:"Підготовка", download_video:"Скачую відео", download_audio:"Скачую звук", download_chat:"Скачую чат", analyze:"Шукаю моменти", speech:"Розпізнаю мовлення: момент {0}/{1}",
   speech_seq:"Розпізнаю мовлення: {0} / {1}", review:"Чекаю на перевірку кандидатів", render:"Збираю кліп {0}/{1}", compile:"Збираю компіляцію", live_wait:"Лайв: оброблено до {0}, чекаю нове",
   live_rec:"Лайв: пишу ефір {0}", done:"Готово: {0} кліпів", cancelled:"Скасовано", error:"Помилка: {0}", muted:"Заглушений звук: {0} с — пропускаю", chat_n:"Чат: {0} повідомлень, затримка {1} с",
-  model:"Завантажую модель мовлення «{0}» (перший раз — скачування)", lang:"Мова стрімера: {0}", subs_off:"Субтитри недоступні: {0}", vclips:"Кліпів глядачів: {0}",
+  model:"Скачую модель мовлення «{0}» (лише перший раз)", model_load:"Модель мовлення «{0}» вже є — вантажу з диска", lang:"Мова стрімера: {0}", subs_off:"Субтитри недоступні: {0}", vclips:"Кліпів глядачів: {0}",
   cands:"Кандидатів: {0}, залишу {1}", parts_log:"Частин: {0}", gpu_fallback:"Відеокарта не впоралася ({0}), рендер на процесорі", compile_err:"Компіляція не вийшла: {0}",
   sources_deleted:"Вихідники цієї нарізки вже видалено", offline:"Стрімер зараз не в ефірі"
 },
@@ -139,7 +139,7 @@ ru: {
   prep:"Подготовка", download_video:"Скачиваю видео", download_audio:"Скачиваю звук", download_chat:"Скачиваю чат", analyze:"Ищу моменты", speech:"Распознаю речь: момент {0}/{1}",
   speech_seq:"Распознаю речь: {0} / {1}", review:"Жду проверки кандидатов", render:"Собираю клип {0}/{1}", compile:"Собираю компиляцию", live_wait:"Лайв: обработано до {0}, жду новое",
   live_rec:"Лайв: пишу эфир {0}", done:"Готово: {0} клипов", cancelled:"Отменено", error:"Ошибка: {0}", muted:"Заглушённый звук: {0} с — пропускаю", chat_n:"Чат: {0} сообщений, задержка {1} с",
-  model:"Загружаю модель речи «{0}» (первый раз — скачивание)", lang:"Язык стримера: {0}", subs_off:"Субтитры недоступны: {0}", vclips:"Клипов зрителей: {0}",
+  model:"Скачиваю модель речи «{0}» (только первый раз)", model_load:"Модель речи «{0}» уже есть — загружаю с диска", lang:"Язык стримера: {0}", subs_off:"Субтитры недоступны: {0}", vclips:"Клипов зрителей: {0}",
   cands:"Кандидатов: {0}, оставлю {1}", parts_log:"Частей: {0}", gpu_fallback:"Видеокарта не справилась ({0}), рендер на процессоре", compile_err:"Компиляция не получилась: {0}",
   sources_deleted:"Исходники этой нарезки уже удалены", offline:"Стример сейчас не в эфире"
 },
@@ -210,7 +210,7 @@ en: {
   prep:"Preparing", download_video:"Downloading video", download_audio:"Downloading audio", download_chat:"Downloading chat", analyze:"Looking for moments", speech:"Recognizing speech: moment {0}/{1}",
   speech_seq:"Recognizing speech: {0} / {1}", review:"Waiting for candidate review", render:"Rendering clip {0}/{1}", compile:"Rendering compilation", live_wait:"Live: done up to {0}, waiting for more",
   live_rec:"Live: recording {0}", done:"Done: {0} clips", cancelled:"Cancelled", error:"Error: {0}", muted:"Muted audio: {0} s — skipping", chat_n:"Chat: {0} messages, delay {1} s",
-  model:"Loading speech model “{0}” (first time downloads it)", lang:"Streamer language: {0}", subs_off:"Subtitles unavailable: {0}", vclips:"Viewer clips: {0}",
+  model:"Downloading speech model «{0}» (first time only)", model_load:"Speech model «{0}» is already here — loading from disk", lang:"Streamer language: {0}", subs_off:"Subtitles unavailable: {0}", vclips:"Viewer clips: {0}",
   cands:"Candidates: {0}, keeping {1}", parts_log:"Parts: {0}", gpu_fallback:"GPU failed ({0}), rendering on CPU", compile_err:"Compilation failed: {0}",
   sources_deleted:"Sources of this cut were deleted", offline:"The streamer is offline"
 }};
