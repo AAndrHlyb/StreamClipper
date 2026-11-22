@@ -107,8 +107,12 @@ def run_job(job):
         job.state, job.stage = "cancelled", "cancelled"
     except Exception as e:
         import traceback; traceback.print_exc()
-        job.state, job.err = "error", str(e)
-        job.log("error", e)
+        tb = traceback.extract_tb(e.__traceback__)
+        tb = [f for f in tb if "StreamClipper" in f.filename or "/sc/" in f.filename.replace("\\", "/") or "\\sc\\" in f.filename] or tb
+        where = f" [{Path(tb[-1].filename).name}:{tb[-1].lineno}]" if tb else ""
+        msg = (str(e).strip().splitlines() or [type(e).__name__])[-1][:300]
+        job.state, job.err = "error", msg + where
+        job.log("error", job.err)
     finally:
         if job.dir:
             job.extra["sources_bytes"] = sum(f.stat().st_size for f in source_files(job.dir) if f.exists())

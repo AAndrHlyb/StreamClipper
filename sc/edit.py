@@ -108,20 +108,57 @@ def best_segment(path, L, total):
 
 
 def lyrics(path, start, dur, o, job):
-    """Слова пісні з таймінгом (розпізнавання мовлення по треку)."""
+    """Слова пісні з таймінгом: 1) вокал відокремлюється від музики (UVR MDX-Net), 2) визначається мова пісні
+    (кілька відрізків, топ-2 мови), 3) розпізнавання з контекстом і пошуком променем, 4) чистка «зациклень»."""
+    from . import vocals as V
+    s0 = max(0.0, start - 3.0); d0 = dur + 5.0  # трохи контексту довкола — слова на межі не губляться
+    job.step("edit_vocals", 61)
+    y = None
     try:
-        mdl = A.whisper(o, job)
-        y = music_pcm(path, start, dur, 16000)
-        segs, _ = mdl.transcribe(y, word_timestamps=True, beam_size=1, vad_filter=False, condition_on_previous_text=False,
-                                 language=o.get("lang") or None)
-        out = []
-        for s in segs:
-            for w in (s.words or []):
-                t = w.word.strip().strip(",.!?…\"«»")
-                if t and (w.probability or 0) > 0.12 and w.end > w.start: out.append({"s": float(w.start), "e": float(w.end), "w": t})
-        return out
+        y = V.separate(path, s0, d0, job)
+    except Exception as e:
+        job.log("vocal_fallback", str(e)[:80])
+    if y is None or len(y) < 16000:
+        y = V.center_vocals(path, s0, d0)
+    if y is None or len(y) < 16000: return []
+    y = y / (np.abs(y).max() + 1e-6) * 0.9
+    job.step("edit_lyrics", 62)
+    oo = dict(o)
+    if oo.get("model") in (None, "base"): oo["model"] = "small"  # для співу base замало
+    try:
+        mdl = A.whisper(oo, job)
     except Exception:
         return []
+    langs = []
+    try:
+        lang, prob, allp = mdl.detect_language(y, language_detection_segments=4)
+        langs = [(lang, prob)] + [(l, p) for l, p in (allp or [])[1:2] if p > 0.15]
+    except Exception:
+        langs = [(o.get("lang"), 0.0)]
+    best, best_sc, best_lang = [], -1.0, None
+    for lang, prob in langs[:2]:
+        try:
+            segs, info = mdl.transcribe(y, language=lang, word_timestamps=True, beam_size=5, best_of=5, temperature=[0.0, 0.2, 0.4],
+                                        vad_filter=True, vad_parameters={"threshold": 0.3, "min_silence_duration_ms": 250},
+                                        condition_on_previous_text=True, no_speech_threshold=0.5, compression_ratio_threshold=2.6,
+                                        hallucination_silence_threshold=1.5)
+            ws = []
+            for sg in segs:
+                for w in (sg.words or []):
+                    t = w.word.strip().strip(",.!?…\"«»()[]")
+                    if t and (w.probability or 0) > 0.08 and w.end > w.start:
+                        ws.append({"s": float(w.start) + s0 - start, "e": float(w.end) + s0 - start, "w": t, "p": float(w.probability or 0)})
+        except Exception:
+            continue
+        ws = [w for w in ws if -0.1 <= w["s"] < dur]
+        clean = []  # «зациклення» Whisper: одне слово 4+ рази підряд
+        for w in ws:
+            if len(clean) >= 2 and clean[-1]["w"].lower() == w["w"].lower() == clean[-2]["w"].lower(): continue
+            clean.append(w)
+        sc = sum(w["p"] for w in clean)
+        if sc > best_sc: best, best_sc, best_lang = clean, sc, lang
+    if best_lang: job.log("lyrics_lang", best_lang, len(best))
+    return best
 
 
 def text_events(m, o, L, rnd, words=None):
@@ -254,9 +291,8 @@ class Segmenter:
         """-> маска float32 (H/2, W/2) 0..1 або None, якщо людини немає."""
         if self.net is None: return None
         cv2 = self.cv2
-        x = cv2.resize(frame, (192, 192), interpolation=cv2.INTER_AREA)
-        x = (cv2.cvtColor(x, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0 - 0.5) / 0.5
-        self.net.setInput(x.transpose(2, 0, 1)[None]); m = self.net.forward()[0, 1]
+        blob = cv2.dnn.blobFromImage(np.ascontiguousarray(frame), 1 / 127.5, (192, 192), (127.5, 127.5, 127.5), swapRB=True, crop=False)
+        self.net.setInput(blob); m = self.net.forward()[0, 1]
         if self.prev is not None: m = 0.55 * m + 0.45 * self.prev
         self.prev = m
         area = float((m > 0.5).mean())
@@ -727,7 +763,7 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     ev = []
     if tm == "lyrics":
         job.step("edit_lyrics", 62); words = lyrics(music, start, L, o, job)
-        if len(words) >= max(3, L / 4): ev = text_events(m, o, L, rnd, words)
+        if len(words) >= 3: ev = text_events(m, o, L, rnd, words)
         else: job.log("edit_nolyrics")
     elif tm == "custom":
         ev = text_events(m, o, L, rnd, None)
@@ -799,6 +835,20 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     wm = sprite(nick, 50, FONT_BOLD, (240, 240, 240), stroke=2, stroke_fill=(30, 30, 30)) if nick else None
     endc = sprite(nick.upper(), fit_size(nick.upper(), FONT_BIG, W * 0.7, hi=220), FONT_BIG, (245, 245, 245)) if nick else None
     rc, fi, prev = {}, 0, None
+    fx_errs = set()
+
+    def safe(tag, f, fallback):
+        """Один ефект не валить весь едіт: помилку пишемо раз (з місцем у коді) і кадр іде далі без цього ефекту."""
+        try:
+            return f()
+        except Exception as e:
+            if tag not in fx_errs:
+                fx_errs.add(tag)
+                import traceback
+                tb = traceback.extract_tb(e.__traceback__)[-1]
+                job.log("fx_err", tag, f"{Path(tb.filename).name}:{tb.lineno} {(str(e).strip().splitlines() or [type(e).__name__])[-1][:90]}")
+                traceback.print_exc()
+            return fallback
     try:
         for i, (sh, pr) in enumerate(zip(shots, parts)):
             job.check()
@@ -840,39 +890,40 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 if fx == "whip" and j < 4:                # вхід: справа, гальмує
                     q = 1 - j / 4; dx += W * 0.22 * q ** 2.2; hblur = max(hblur, int(30 + 70 * q))
                 if fx == "flash" and j < 4: z *= 1 + 0.12 * (1 - j / 4)
-                fr = zoom_frame(fr, z, ang, dx, dy)
-                if blur > 0.01: fr = zoom_blur(fr, blur)
-                if hblur: fr = cv2.blur(fr, (hblur | 1, 1))
-                if (fx == "glitch" and j < 3) or (nfx == "glitch" and tail < 2): fr = glitch(fr, rnd, 0.9 if j < 3 else 0.6)
-                if nfx == "pixel" and tail < 3: fr = FX.tr_pixel(fr, (3 - tail) / 3)
-                if fx == "pixel" and j < 3: fr = FX.tr_pixel(fr, 1 - j / 3)
-                if nfx == "spin" and tail < 3: fr = FX.tr_spin(fr, (3 - tail) / 3, 1)
-                if fx == "spin" and j < 3: fr = FX.tr_spin(fr, 1 - j / 3, -1)
-                if fx == "iris" and j < 6: fr = FX.tr_iris(prev, fr, (j + 1) / 6)
-                if fx == "shutter" and j < 6: fr = FX.tr_shutter(prev, fr, (j + 1) / 6)
+                fr = safe("zoom", lambda: zoom_frame(fr, z, ang, dx, dy), fr)
+                if blur > 0.01: fr = safe("blur", lambda: zoom_blur(fr, blur), fr)
+                if hblur: fr = safe("whip", lambda: cv2.blur(fr, (hblur | 1, 1)), fr)
+                if (fx == "glitch" and j < 3) or (nfx == "glitch" and tail < 2): fr = safe("glitch", lambda: glitch(fr, rnd, 0.9 if j < 3 else 0.6), fr)
+                if nfx == "pixel" and tail < 3: fr = safe("pixel", lambda: FX.tr_pixel(fr, (3 - tail) / 3), fr)
+                if fx == "pixel" and j < 3: fr = safe("pixel", lambda: FX.tr_pixel(fr, 1 - j / 3), fr)
+                if nfx == "spin" and tail < 3: fr = safe("spin", lambda: FX.tr_spin(fr, (3 - tail) / 3, 1), fr)
+                if fx == "spin" and j < 3: fr = safe("spin", lambda: FX.tr_spin(fr, 1 - j / 3, -1), fr)
+                if prev is not None and fx == "iris" and j < 6: fr = safe("iris", lambda: FX.tr_iris(prev, fr, (j + 1) / 6), fr)
+                if prev is not None and fx == "shutter" and j < 6: fr = safe("shutter", lambda: FX.tr_shutter(prev, fr, (j + 1) / 6), fr)
                 if leak is not None:
                     a = 0.32 * (0.5 + 0.5 * math.sin(t * 3 + i))
                     fr = np.clip(fr.astype(np.float32) + leak * a, 0, 255).astype(np.uint8)
                 # ---- людина і текст
-                mask = seg(fr) if seg else None
-                head = head_of(mask) if mask is not None else None
+                mask = safe("seg", lambda: seg(fr), None) if seg else None
+                head = safe("head", lambda: head_of(mask), None) if mask is not None else None
                 lt = j / FPS; dshot = pr["n"] / FPS
                 if sh.get("look"):
-                    try: fr = FX.LOOKS[sh["look"]](fr, mask if head else None, head, lt, dshot, sst, ev_acc)
-                    except Exception: pass
+                    fr = safe("look_" + sh["look"], lambda: FX.LOOKS[sh["look"]](fr, mask if head else None, head, lt, dshot, sst, ev_acc), fr)
                 if sh.get("cutin") and head is not None and lt < 0.5:
-                    fr = FX.cutout_enter(fr, mask, lt, sst, sh.get("dir", 1))
+                    fr = safe("cutout", lambda: FX.cutout_enter(fr, mask, lt, sst, sh.get("dir", 1)), fr)
                 for e in ev:
-                    if e["t0"] <= t < e["t1"]: draw_text(fr, e, t, mask if head else None, head, rc, bp)
-                if wm is not None and t < T - 0.9: blend(fr, wm, W / 2, H * 0.80, None, False, 0.92)
+                    if e["t0"] <= t < e["t1"]: safe("text_" + str(e.get("style")), lambda: draw_text(fr, e, t, mask if head else None, head, rc, bp), None)
+                if wm is not None and t < T - 0.9: safe("nick", lambda: blend(fr, wm, W / 2, H * 0.80, None, False, 0.92), None)
                 if fx == "flash" and j < 3:
                     a = (0.85, 0.45, 0.15)[j]; fr = cv2.addWeighted(fr, 1 - a, np.full_like(fr, 255), a, 0)
                 if endc is not None and t >= T - 0.9:
                     q = (t - (T - 0.9)) / 0.9
                     fr = (fr * max(0.0, 1 - q * 2.2)).astype(np.uint8)
-                    blend(fr, warp(endc, 1.12 - 0.12 * ease(q * 2)), W / 2, H / 2, None, False, min(1.0, q * 4))
+                    safe("end", lambda: blend(fr, warp(endc, 1.12 - 0.12 * ease(q * 2)), W / 2, H / 2, None, False, min(1.0, q * 4)), None)
                 elif t > T - 0.4:
                     fr = (fr * max(0.0, (T - t) / 0.4)).astype(np.uint8)
+                if not isinstance(fr, np.ndarray) or fr.shape != (H, W, 3): fr = prev if prev is not None else np.zeros((H, W, 3), np.uint8)
+                fr = np.ascontiguousarray(fr, np.uint8)
                 pe.stdin.write(fr.tobytes()); fi += 1; prev = fr
                 if fi % 15 == 0: job.pct = 78 + 20 * fi / nfr_total; job.sub = f"{fi}/{nfr_total}"
             pd.stdout.close(); pd.wait()
