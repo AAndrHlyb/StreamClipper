@@ -270,7 +270,20 @@ def probe(url, live=False):
     else:
         info["kind"] = "video"
         info["has_chat"] = pf == "youtube" and bool(j.get("was_live") or j.get("live_status") == "was_live")
+        if pf == "youtube" and j.get("id"):
+            info["yt_id"] = j["id"]; info["skip"] = sponsor_segments(j["id"])
     return info
+
+
+def sponsor_segments(vid):
+    """SponsorBlock: рекламні інтеграції, самопіар, заклики підписатися, інтро/аутро. -> [(a, b)] с."""
+    try:
+        import json as _j, urllib.parse as up
+        cats = up.quote(_j.dumps(["sponsor", "selfpromo", "interaction", "intro", "outro", "preview"]))
+        r = http_json(f"https://sponsor.ajay.app/api/skipSegments?videoID={vid}&categories={cats}", timeout=8)
+        return [(float(x["segment"][0]), float(x["segment"][1])) for x in (r or []) if x.get("segment")]
+    except Exception:
+        return []
 
 
 _SRC = {}  # url -> (час, пряме посилання на потік), щоб кілька кадрів не питали yt-dlp кожен раз

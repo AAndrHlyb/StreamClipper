@@ -16,6 +16,12 @@ from .core import src_fps
 W, H, FPS = 1080, 1920, 30
 FONT_BIG = APP_DIR / "fonts" / "Anton-Regular.ttf"
 FONT_BOLD = APP_DIR / "fonts" / "Montserrat-ExtraBold.ttf"
+FONT_CYR = APP_DIR / "fonts" / "Oswald-Bold.ttf"  # Anton не має кирилиці — для неї Oswald Bold
+
+
+def _font(font, txt):
+    if font == FONT_BIG and any(ord(c) > 0x24F for c in txt): return FONT_CYR
+    return font
 SEG_MODEL = APP_DIR / "models" / "human_segmentation_pphumanseg_2023mar.onnx"
 GRADES = {
     "warm": "eq=contrast=1.08:saturation=1.28:gamma=0.97,colorbalance=rs=.06:gs=.01:bs=-.06:rm=.04:bm=-.04",
@@ -82,6 +88,24 @@ def analyze_music(path, start, dur):
             "hits": [h for h in hits if h < dur], "period": period / fps, "drop": drop if drop < dur - 1 else 0.0}
 
 
+def best_segment(path, L, total):
+    """Найенергійніший відрізок треку довжини L (приспів / дроп), початок — на сильну долю."""
+    sr, hop = 11025, 512
+    y = music_pcm(path, 0, total, sr)
+    if len(y) < sr * (L + 2): return 0.0
+    fr = len(y) // hop
+    rms = np.sqrt((y[:fr * hop].reshape(fr, hop) ** 2).mean(1))
+    fps = sr / hop; win = int(L * fps)
+    cs = np.concatenate([[0], np.cumsum(rms)]); en = (cs[win:] - cs[:-win]) / win
+    # трохи цінуємо стрибок енергії на початку (вхід у приспів)
+    lead = int(1.5 * fps); jump = np.zeros_like(en)
+    for i in range(lead, len(en)): jump[i] = rms[i:i + lead].mean() - rms[i - lead:i].mean()
+    sc = en / (en.max() + 1e-9) + 0.6 * np.maximum(jump, 0) / (np.abs(jump).max() + 1e-9)
+    sc[: int(3 * fps)] *= 0.7  # не з самого початку треку
+    st = float(np.argmax(sc) / fps)
+    return max(0.0, min(st, total - L - 0.2))
+
+
 def lyrics(path, start, dur, o, job):
     """Слова пісні з таймінгом (розпізнавання мовлення по треку)."""
     try:
@@ -93,7 +117,7 @@ def lyrics(path, start, dur, o, job):
         for s in segs:
             for w in (s.words or []):
                 t = w.word.strip().strip(",.!?…\"«»")
-                if t and (w.probability or 0) > 0.25 and w.end > w.start: out.append({"s": float(w.start), "e": float(w.end), "w": t})
+                if t and (w.probability or 0) > 0.12 and w.end > w.start: out.append({"s": float(w.start), "e": float(w.end), "w": t})
         return out
     except Exception:
         return []
@@ -123,41 +147,6 @@ def text_events(m, o, L, rnd, words=None):
         e["t1"] = min(nxt, e["t0"] + 1.3, L)
         if e["t1"] - e["t0"] < 0.18: e["t1"] = e["t0"] + 0.18
     return ev
-
-
-# ------------------------------------------------------------------ план кадрів
-def plan_shots(m, L, pool, rnd):
-    beats = [b for b in m["beats"] if 0.05 < b < L - 0.15]
-    fast = m["period"] < 0.42
-    cuts = [0.0]
-    for i, b in enumerate(beats):
-        e = m["energy"][m["beats"].index(b)] if b in m["beats"] else 0.5
-        step_ok = (b - cuts[-1]) >= (0.3 if e > 0.55 else 0.55) and (not fast or (b - cuts[-1]) >= 0.42 or e > 0.85)
-        if step_ok or b - cuts[-1] > 1.6: cuts.append(b)
-    cuts.append(L)
-    shots, used, last = [], [], None
-    ranked = sorted(range(len(pool)), key=lambda k: -pool[k].get("final", 0))
-    offs = [0.0, -1.2, 1.0, -2.4, 2.2, -3.6, 3.4]
-    for i in range(len(cuts) - 1):
-        a, b = cuts[i], cuts[i + 1]; d = b - a
-        hard = any(abs(h - a) < 0.06 for h in m["hits"])
-        drop = m["drop"] and abs(a - m["drop"]) < max(0.5, d)
-        speed = 0.5 if (drop or (d >= 0.9 and rnd.random() < 0.3)) else (1.3 if d < 0.4 and rnd.random() < 0.25 else 1.0)
-        pick = None
-        for k in (ranked[:6] if (hard or drop) else ranked):
-            if k == last and len(pool) > 1: continue
-            for off in offs:
-                t = pool[k]["peak"] + off
-                if any(u[0] == k and abs(u[1] - t) < 1.6 for u in used): continue
-                if pool[k].get("lo") is not None and not (pool[k]["lo"] <= t and t + d * speed <= pool[k]["hi"]): continue
-                pick = (k, t); break
-            if pick: break
-        if not pick:  # усе використано — беремо випадковий з повтором подалі
-            k = rnd.choice(ranked); pick = (k, pool[k]["peak"] + rnd.uniform(-3, 3))
-        used.append(pick); last = pick[0]
-        shots.append({"a": a, "b": b, "k": pick[0], "t": max(0.0, pick[1]), "speed": speed, "flash": hard and rnd.random() < 0.6,
-                      "whip": (not hard) and rnd.random() < 0.18, "rgb": hard and rnd.random() < 0.5})
-    return shots
 
 
 # ------------------------------------------------------------------ кадр із джерела
@@ -229,37 +218,6 @@ def _faces(img):
     return list(_CASC["f"].detectMultiScale(g, 1.1, 5, minSize=(int(img.shape[1] * 0.06),) * 2))
 
 
-def render_shot(src, t, sh, o, job, out, cam=None, logos=None):
-    """Один кадр плану → 1080×1920, точна кількість кадрів. t — час початку у файлі src."""
-    nfr = max(2, int(round((sh["b"] - sh["a"]) * FPS)))
-    pre = f"crop=iw*{cam[2]:.4f}:ih*{cam[3]:.4f}:iw*{cam[0]:.4f}:ih*{cam[1]:.4f}" if cam else ""
-    fx, face = 0.5, False
-    img = _sample(src, t + (sh["b"] - sh["a"]) * sh["speed"] / 2, pre, job)
-    if img is not None:
-        h, w = img.shape[:2]; fs = _faces(img)
-        if fs:
-            face = True; x, y, fw, fh = max(fs, key=lambda f: f[2] * f[3])
-            ow = min(1.0, h * 9 / 16 / w)
-            if ow < 1: fx = min(1, max(0, ((x + fw / 2) / w - ow / 2) / (1 - ow)))
-    grade = GRADES.get(o.get("edit_grade") or "warm", GRADES["warm"])
-    sfps = src_fps(src) or 30
-    up = 1.0
-    if img is not None:  # наскільки збільшуємо: кроп 9:16 зі зменшеного кадру → оцінка у пікселях джерела
-        sh0 = _src_h(src)
-        if sh0: up = H / sh0 / (cam[3] if cam else 1.0)
-    vf = ",".join(x for x in [
-        delogo_vf(src, logos), pre, f"crop=w='min(iw,ih*9/16)':h='min(ih,iw*16/9)':x='(iw-ow)*{fx:.3f}':y='(ih-oh)*0.45'",
-        "hqdn3d=1.2:1.2:2.5:2.5" if up > 1.3 else "",  # прибрати шум/блоки перед збільшенням
-        f"scale={W}:{H}:flags=lanczos+accurate_rnd+full_chroma_int", "setsar=1",
-        f"cas={min(0.85, 0.35 + 0.25 * max(0.0, up - 1)):.2f}" if up > 1.05 else "cas=0.3",  # адаптивне різкість
-        f"setpts=(PTS-STARTPTS)/{sh['speed']}",
-        f"minterpolate=fps={FPS}:mi_mode=blend" if (sh["speed"] < 1 and sfps < 45) else f"fps={FPS}",
-        grade, "noise=alls=2:allf=t", "vignette=PI/5", "format=yuv420p"] if x)
-    run_proc([ffmpeg(), "-y", "-v", "error", "-ss", f"{max(0, t):.3f}", "-t", f"{(sh['b'] - sh['a']) * sh['speed'] + 0.5:.3f}", "-i", str(src),
-              "-vf", vf, "-frames:v", str(nfr), "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "8", str(out)], job)
-    return {"file": str(out), "n": nfr, "face": face}
-
-
 # ------------------------------------------------------------------ маска людини
 class Segmenter:
     def __init__(self):
@@ -302,6 +260,7 @@ _SPR = {}
 
 def sprite(txt, size, font, fill, stroke=0, stroke_fill=(0, 0, 0), outline_only=False):
     """RGBA-спрайт (numpy, BGR+A) з кешем."""
+    font = _font(font, txt)
     key = (txt, size, str(font), fill, stroke, stroke_fill, outline_only)
     if key in _SPR: return _SPR[key]
     from PIL import Image, ImageDraw, ImageFont
@@ -324,6 +283,7 @@ def sprite(txt, size, font, fill, stroke=0, stroke_fill=(0, 0, 0), outline_only=
 
 def fit_size(txt, font, width, lo=60, hi=520):
     from PIL import ImageFont
+    font = _font(font, txt)
     s = hi
     while s > lo:
         bb = ImageFont.truetype(str(font), s).getbbox(txt)
@@ -357,95 +317,404 @@ def blend(frame, spr, cx, cy, mask=None, behind=False, alpha=1.0):
 def ease(x): x = min(1.0, max(0.0, x)); return 1 - (1 - x) ** 3
 
 
-def draw_text(frame, ev, t, mask, head, rnd_cache):
-    """Малює одну подію тексту в кадр."""
-    st = ev["style"]; txt = ev["txt"].upper() if ev.get("caps", True) else ev["txt"]
-    p = (t - ev["t0"]) / max(0.05, ev["t1"] - ev["t0"]); k = ease((t - ev["t0"]) / 0.16)
-    fade = min(1.0, (ev["t1"] - t) / 0.08, (t - ev["t0"]) / 0.04 + 0.2)
+# ------------------------------------------------------------------ аналіз картинки джерела
+def scan_video(src, dur, skip=(), job=None):
+    """Ключові кадри відео → оцінка «цікавості» картинки: обличчя, різкість, колір, яскравість.
+    Один швидкий прохід (декодуються лише ключові кадри). -> [{t, score, face}]"""
+    import threading, re as _re
+    cv2 = _cv2()
+    w, h = 320, 180
+    p = subprocess.Popen([ffmpeg(), "-v", "info", "-hide_banner", "-skip_frame", "nokey", "-i", str(src), "-an", "-vf", f"scale={w}:{h},showinfo",
+                          "-vsync", "vfr", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    times = []
+
+    def rd():
+        for line in p.stderr:
+            m = _re.search(rb"pts_time:([\d.]+)", line)
+            if m: times.append(float(m.group(1)))
+    th = threading.Thread(target=rd, daemon=True); th.start()
+    feats, k = [], 0
+    while True:
+        buf = p.stdout.read(w * h * 3)
+        if len(buf) < w * h * 3: break
+        if job is not None: job.check()
+        img = np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        fs = _faces_small(g)
+        face = max((f[2] * f[3] for f in fs), default=0) / (w * h)
+        sharp = float(cv2.Laplacian(g, cv2.CV_32F).var())
+        sat = float(cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[..., 1].mean())
+        bright = float(g.mean())
+        feats.append((k, face, sharp, sat, bright)); k += 1
+    p.wait(); th.join(timeout=2)
+    if not feats: return []
+    sh = np.log1p([f[2] for f in feats]); sh = (sh - sh.mean()) / (sh.std() + 1e-6)
+    sa = np.array([f[3] for f in feats]); sa = (sa - sa.mean()) / (sa.std() + 1e-6)
+    out = []
+    for i, (k, face, _, _, bright) in enumerate(feats):
+        t = times[k] if k < len(times) else k * 2.0
+        if t < dur * 0.02 or t > dur * 0.985: continue
+        if any(a - 1 <= t <= b + 1 for a, b in skip): continue  # реклама
+        sc = 3.0 * min(1.0, face * 25) + 0.7 * sh[i] + 0.35 * sa[i] - (2.5 if bright < 38 else 0) - (1.0 if bright > 235 else 0)
+        out.append({"t": t, "score": float(sc), "face": face > 0})
+    return out
+
+
+def _faces_small(g):
+    cv2 = _cv2()
+    if "f" not in _CASC: _CASC["f"] = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    return list(_CASC["f"].detectMultiScale(cv2.equalizeHist(g), 1.1, 4, minSize=(14, 14)))
+
+
+# ------------------------------------------------------------------ план кадрів
+def plan_shots(m, L, pool, rnd, video_pool=None):
+    """Склейки в біт за драматургією: вступ (довші кадри) → розгін → кульмінація на дропі (кожна доля) → фінал.
+    Переходи: 2–3 фірмові на весь ролик; спалах — лише на найсильніших піках."""
+    beats = [b for b in m["beats"] if 0.05 < b < L - 0.15]
+    drop = m["drop"] or (L * 0.45)
+    resolve = L - 1.2
+    cuts = [0.0]
+    for b in beats:
+        i = m["beats"].index(b); e = m["energy"][i]
+        if b >= resolve: break
+        if b < min(drop, L * 0.25): need = 0.9          # вступ: дихаємо
+        elif b < drop: need = 0.55 if e < 0.7 else 0.42  # розгін
+        else: need = 0.27 if e > 0.55 else 0.45          # кульмінація
+        if b - cuts[-1] >= need - 0.03 or b - cuts[-1] > 1.6: cuts.append(b)
+    cuts.append(L)
+    n = len(cuts) - 1
+    sigs = {"punch": "zoom", "whip": "whip", "glitch": "glitch"}
+    sig = rnd.choice(list(sigs))
+    strengths = m["strength"]; thr = sorted(strengths)[int(len(strengths) * 0.85)] if strengths else 1
+    # вибір моментів: найкращі з відстанню між ними → у хронологічному порядку (історія), найсильніший — на дроп
+    picks = []
+    if video_pool:
+        for c in sorted(video_pool, key=lambda x: -x["score"]):
+            if all(abs(c["t"] - p["t"]) > 3.0 for p in picks): picks.append(c)
+            if len(picks) >= n: break
+        while len(picks) < n: picks.append(rnd.choice(video_pool))
+        best = max(picks, key=lambda x: x["score"])
+        picks = sorted([p for p in picks if p is not best], key=lambda x: x["t"])
+        di = min(range(n), key=lambda i: abs(cuts[i] - drop))
+        picks.insert(min(di, len(picks)), best)
+    flashes = 0; shots = []
+    for i in range(n):
+        a, b = cuts[i], cuts[i + 1]; d = b - a
+        bi = min(range(len(m["beats"])), key=lambda k: abs(m["beats"][k] - a)) if m["beats"] else 0
+        st = strengths[bi] if strengths else 0.5
+        is_drop = abs(a - drop) < 0.2 or (i > 0 and cuts[i - 1] < drop <= a)
+        before_drop = i + 1 < n and cuts[i + 1] <= drop < cuts[i + 1] + 0.2
+        # швидкість: перед дропом — сповільнення, що «приземляється» на удар; у кульмінації — інколи прискорення
+        if before_drop and d >= 0.4: speed, ramp = 1.6, "in"
+        elif is_drop: speed, ramp = 1.0, "none"
+        elif a > drop and d >= 0.5 and rnd.random() < 0.35: speed, ramp = 1.7, rnd.choice(["in", "out"])
+        else: speed, ramp = (0.85 if a < drop else 1.15), "none"
+        if i == 0: fx = "none"
+        elif is_drop and flashes < 3: fx, flashes = "flash", flashes + 1
+        elif st >= thr and flashes < 3 and a > drop: fx, flashes = "flash", flashes + 1
+        elif st >= thr * 0.8 or (i % 4 == 0): fx = sigs[sig]
+        else: fx = "cut"
+        if video_pool:
+            k, t = -1, max(0.0, picks[i]["t"] - 0.15)
+        else:
+            ranked = sorted(range(len(pool)), key=lambda j: -pool[j].get("final", 0))
+            k = ranked[(0 if is_drop else i) % len(ranked)]; t = pool[k]["peak"] + rnd.uniform(-3, 2)
+        shots.append({"a": a, "b": b, "k": k, "t": t, "speed": speed, "ramp": ramp, "hard": st >= thr, "drop": is_drop,
+                      "fx": fx, "resolve": a >= resolve - 0.01})
+    return shots
+
+
+# ------------------------------------------------------------------ кадр із джерела
+def render_shot(src, t, sh, o, job, out, cam=None, logos=None):
+    """Кадр плану → 1080×1920. Повертає кількість ВИХІДНИХ кадрів n і кількість кадрів у файлі nsrc (для рампи швидкості)."""
+    nfr = max(2, int(round((sh["b"] - sh["a"]) * FPS)))
+    span = (sh["b"] - sh["a"]) * sh["speed"]
+    nsrc = max(nfr, int(round(span * FPS)))
+    pre = f"crop=iw*{cam[2]:.4f}:ih*{cam[3]:.4f}:iw*{cam[0]:.4f}:ih*{cam[1]:.4f}" if cam else ""
+    fx, face = 0.5, False
+    img = _sample(src, t + span / 2, pre, job)
+    if img is not None:
+        hh, ww = img.shape[:2]; fs = _faces(img)
+        if fs:
+            face = True; x, y, fw, fh = max(fs, key=lambda f: f[2] * f[3])
+            ow = min(1.0, hh * 9 / 16 / ww)
+            if ow < 1: fx = min(1, max(0, ((x + fw / 2) / ww - ow / 2) / (1 - ow)))
+    grade = GRADES.get(o.get("edit_grade") or "warm", GRADES["warm"])
+    sfps = src_fps(src) or 30
+    sh0 = _src_h(src); up = (H / sh0 / (cam[3] if cam else 1.0)) if sh0 else 1.0
+    slow = sh["speed"] < 1 or sh["ramp"] != "none"
+    vf = ",".join(x for x in [
+        delogo_vf(src, logos), pre, f"crop=w='min(iw,ih*9/16)':h='min(ih,iw*16/9)':x='(iw-ow)*{fx:.3f}':y='(ih-oh)*0.45'",
+        "hqdn3d=1.2:1.2:2.5:2.5" if up > 1.3 else "",
+        f"scale={W}:{H}:flags=lanczos+accurate_rnd+full_chroma_int", "setsar=1",
+        f"cas={min(0.85, 0.35 + 0.25 * max(0.0, up - 1)):.2f}",
+        f"setpts=(PTS-STARTPTS)/{sh['speed'] if sh['ramp'] == 'none' else 1}",
+        f"minterpolate=fps={FPS}:mi_mode=blend" if (slow and sfps < 45 and sh["speed"] < 1) else f"fps={FPS}",
+        grade, "noise=alls=2:allf=t", "vignette=PI/5", "format=yuv420p"] if x)
+    nget = nsrc if sh["ramp"] != "none" else nfr
+    run_proc([ffmpeg(), "-y", "-v", "error", "-ss", f"{max(0, t):.3f}", "-t", f"{span + 0.6:.3f}", "-i", str(src),
+              "-vf", vf, "-frames:v", str(nget), "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "8", str(out)], job)
+    return {"file": str(out), "n": nfr, "nsrc": nget, "face": face}
+
+
+def ramp_index(j, n, nsrc, kind):
+    """Велосіті: швидко → повільно (in) або повільно → швидко (out)."""
+    x = j / max(1, n - 1)
+    if kind == "in": y = 1 - (1 - x) ** 2.6
+    elif kind == "out": y = x ** 2.6
+    else: y = x
+    return min(nsrc - 1, int(round(y * (nsrc - 1))))
+
+
+# ------------------------------------------------------------------ текст: події зі слів стрімера (якщо пісня без слів)
+def speech_events(shots, meta, o, job, L, rnd):
+    ev = []
+    audio = meta.get("audio") or meta.get("video")
+    if not audio: return ev
+    off = meta.get("audio_offset", 0.0)
+    for sh in shots:
+        if sh["b"] - sh["a"] < 0.3 or rnd.random() < 0.25: continue
+        try:
+            ws = A.words_of(audio, sh["t"], 2.5, o, job, src_offset=off) if meta.get("video") else []
+        except Exception:
+            ws = []
+        good = [w["w"].strip(",.!?…\"«»") for w in ws if len(w["w"].strip(",.!?…\"«»")) >= 3]
+        if not good: continue
+        txt = " ".join(sorted(good, key=len, reverse=True)[:1 if rnd.random() < 0.6 else 2])
+        ev.append({"t0": sh["a"], "t1": min(L, sh["b"] + (0.2 if sh["b"] - sh["a"] < 0.6 else 0)), "txt": txt})
+    return ev
+
+
+# ------------------------------------------------------------------ текст: стилі
+def glow(spr, color, r=14):
+    cv2 = _cv2(); a = spr[..., 3]
+    pad = r * 2
+    big = np.zeros((a.shape[0] + 2 * pad, a.shape[1] + 2 * pad), np.uint8); big[pad:-pad, pad:-pad] = a
+    g = cv2.GaussianBlur(big, (0, 0), r)
+    out = np.zeros(big.shape + (4,), np.uint8); out[..., :3] = color; out[..., 3] = np.clip(g.astype(np.int32) * 2, 0, 255)
+    return out
+
+
+def tint(spr, color):
+    o = spr.copy(); o[..., :3] = color; return o
+
+
+def back_ease(x, s=1.9):
+    x = min(1.0, max(0.0, x)) - 1; return 1 + x * x * ((s + 1) * x + s)
+
+
+def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
+    st = ev["style"]; txt = ev["txt"].upper()
+    dt = t - ev["t0"]; p = dt / max(0.05, ev["t1"] - ev["t0"])
+    k = back_ease(dt / 0.22); k0 = min(1.0, dt / 0.06)
+    fade = max(0.0, min(1.0, (ev["t1"] - t) / 0.07, k0 + 0.1))
     if fade <= 0: return
-    acc, white = ev["color"], (245, 245, 245)
+    acc, white = ev["color"], (246, 246, 246)
     person = mask is not None and head is not None
     hx = head["x"] if person else W / 2
+    cy = (head["cy"] + H * 0.10) if person else H * 0.42
+    pulse = 1 + 0.06 * beat_pulse
     if st == "behind":
-        sz = fit_size(txt, FONT_BIG, W * 0.94); spr = sprite(txt, sz, FONT_BIG, ev.get("fill", white))
-        y = (head["cy"] + H * 0.10) if person else H * 0.42
-        blend(frame, warp(spr, 1.18 - 0.18 * k), W / 2, y + 30 * (1 - k), mask, person, fade)
+        sz = fit_size(txt, FONT_BIG, W * 0.96, hi=560); spr = sprite(txt, sz, FONT_BIG, ev["fill"])
+        s = (1.35 - 0.35 * k) * pulse
+        blend(frame, warp(glow(spr, acc, 18), s), W / 2, cy, mask, person, 0.55 * fade)
+        blend(frame, warp(spr, s), W / 2, cy + 40 * (1 - min(1, k)), mask, person, fade)
     elif st == "stack":
-        sz = fit_size(txt, FONT_BIG, W * 0.86, hi=360)
+        sz = fit_size(txt, FONT_BIG, W * 0.9, hi=380)
         sol, out = sprite(txt, sz, FONT_BIG, acc), sprite(txt, sz, FONT_BIG, white, stroke=4, outline_only=True)
-        y = (head["cy"] + H * 0.08) if person else H * 0.40; gap = sol.shape[0] * 0.86; dx = 60 * (p - 0.5)
-        blend(frame, out, W / 2 - dx, y - gap, mask, person, fade * k)
-        blend(frame, sol, W / 2, y, mask, person, fade)
-        blend(frame, out, W / 2 + dx, y + gap, mask, person, fade * k)
+        gap = sol.shape[0] * 0.84; dx = 90 * (p - 0.5)
+        for n, (spr, ox) in enumerate([(out, -dx), (sol, 0), (out, dx), (out, -dx * 0.5)][:3]):
+            yy = cy + (n - 1) * gap
+            blend(frame, warp(spr, pulse if n == 1 else 1), W / 2 + ox, yy + 60 * (1 - min(1, k)) * (n - 1), mask, person, fade * (1 if n == 1 else min(1, k)))
+    elif st == "split":  # верхня половина з одного боку, нижня — з іншого
+        sz = fit_size(txt, FONT_BIG, W * 0.94, hi=520); spr = sprite(txt, sz, FONT_BIG, white)
+        hh = spr.shape[0] // 2; e = ease(dt / 0.25)
+        blend(frame, spr[:hh], W / 2 - (1 - e) * W, cy - hh / 2, mask, person, fade)
+        blend(frame, tint(spr[hh:], acc), W / 2 + (1 - e) * W, cy + hh / 2, mask, person, fade)
+    elif st == "wipe":  # контур, заливка біжить зліва направо
+        sz = fit_size(txt, FONT_BIG, W * 0.94, hi=520)
+        out, sol = sprite(txt, sz, FONT_BIG, white, stroke=5, outline_only=True), sprite(txt, sz, FONT_BIG, acc)
+        cut = int(sol.shape[1] * min(1.0, p * 1.4)); part = sol.copy(); part[:, cut:, 3] = 0
+        blend(frame, warp(out, pulse), W / 2, cy, mask, person, fade)
+        blend(frame, warp(part, pulse), W / 2, cy, mask, person, fade)
+    elif st == "cascade":  # літери падають по черзі з відскоком
+        sz = fit_size(txt, FONT_BIG, W * 0.9, hi=300)
+        from PIL import ImageFont
+        f = ImageFont.truetype(str(_font(FONT_BIG, txt)), sz); total = f.getlength(txt); x = W / 2 - total / 2
+        for i, ch in enumerate(txt):
+            cw = f.getlength(ch)
+            if ch != " ":
+                q = back_ease((dt - i * 0.035) / 0.2)
+                if q > 0:
+                    col = acc if i % 2 else white
+                    blend(frame, warp(sprite(ch, sz, FONT_BIG, col, stroke=3), max(0.05, q)), x + cw / 2, H * 0.30 - 160 * (1 - q), None, False, fade)
+            x += cw
     elif st == "pop":
-        spr = sprite(txt, 118, FONT_BOLD, acc, stroke=9)
+        spr = sprite(txt, 130, FONT_BOLD, acc, stroke=10)
         y0 = max(H * 0.17, head["top"] - 30) if person else H * 0.3
-        ang = rnd_cache.setdefault(id(ev), random.uniform(-14, 14))
-        blend(frame, warp(spr, 0.5 + 0.6 * k, ang * k), hx + ang * 6 * p, y0 - 170 * ease(p * 1.2), None, False, fade)
-    elif st == "orbit":  # слово дугою облітає голову: задня половина ховається за людиною
-        chars = list(txt)
-        sz = 124; hw = ((head["x1"] - head["x0"]) / 2) if person else W * 0.25
-        rx, ry = min(W * 0.42, max(W * 0.22, hw * 0.75)), 64
-        cx, cy = (hx, head["cy"]) if person else (W / 2, H * 0.4)
+        ang = rc.setdefault(id(ev), random.uniform(-14, 14))
+        pos = (hx + ang * 6 * p, y0 - 190 * ease(p * 1.2))
+        blend(frame, warp(tint(spr, (60, 60, 255)), 0.5 + 0.7 * min(1, k), ang), pos[0] - 8, pos[1], None, False, 0.5 * fade)
+        blend(frame, warp(spr, 0.5 + 0.7 * min(1, k), ang), pos[0], pos[1], None, False, fade)
+    elif st == "orbit":
+        chars = list(txt); sz = 132
+        hw = ((head["x1"] - head["x0"]) / 2) if person else W * 0.25
+        rx, ry = min(W * 0.44, max(W * 0.24, hw * 0.8)), 70
+        ox, oy = (hx, head["cy"]) if person else (W / 2, H * 0.4)
         step = min(0.36, 2 * math.pi / (len(chars) + 1))
-        base = rnd_cache.setdefault(id(ev), random.uniform(0, 6.28)) + (t - ev["t0"]) * 1.5
+        base = rc.setdefault(id(ev), random.uniform(0, 6.28)) + dt * 1.7
         for i, ch in enumerate(chars):
             if ch == " ": continue
-            th = base - i * step
-            x, y, front = cx + rx * math.cos(th), cy + ry * math.sin(th), math.sin(th) > 0
-            spr = sprite(ch, sz, FONT_BIG, acc if front else (210, 210, 210), stroke=3 if front else 0)
-            blend(frame, warp(spr, 0.72 + 0.28 * (math.sin(th) + 1) / 2), x, y, mask, person and not front, fade * k)
+            th = base - i * step; front = math.sin(th) > 0
+            spr = sprite(ch, sz, FONT_BIG, acc if front else (215, 215, 215), stroke=3 if front else 0)
+            blend(frame, warp(spr, 0.7 + 0.3 * (math.sin(th) + 1) / 2), ox + rx * math.cos(th), oy + ry * math.sin(th), mask,
+                  person and not front, fade * min(1, k))
     elif st == "side":
-        sz = fit_size(txt, FONT_BIG, H * 0.62, hi=300)
+        sz = fit_size(txt, FONT_BIG, H * 0.66, hi=320)
         spr = warp(sprite(txt, sz, FONT_BIG, white, stroke=3, stroke_fill=acc), 1.0, 90)
-        side = rnd_cache.setdefault(id(ev), random.choice([-1, 1]))
-        x = (head["x0"] - 40 if side < 0 else head["x1"] + 40) if person else (W * 0.18 if side < 0 else W * 0.82)
-        x = min(W - spr.shape[1] * 0.35, max(spr.shape[1] * 0.35, x))
-        blend(frame, spr, x, H * 0.48 - 120 * (1 - k), mask, person, fade)
-    else:  # type — по літері внизу
-        n = max(1, int(len(txt) * min(1.0, (t - ev["t0"]) / 0.25)))
-        spr = sprite(txt[:n], 96, FONT_BOLD, white, stroke=8)
-        blend(frame, spr, W / 2, H * 0.74, None, False, fade)
-        bar = np.zeros((14, int(spr.shape[1] * 0.9 * k) + 1, 4), np.uint8); bar[..., :3] = acc; bar[..., 3] = 255
-        blend(frame, bar, W / 2, H * 0.74 + spr.shape[0] / 2 + 10, None, False, fade)
+        side = rc.setdefault(id(ev), random.choice([-1, 1]))
+        x = (head["x0"] - 30 if side < 0 else head["x1"] + 30) if person else (W * 0.18 if side < 0 else W * 0.82)
+        x = min(W - spr.shape[1] * 0.4, max(spr.shape[1] * 0.4, x))
+        blend(frame, spr, x, H * 0.48 - 220 * (1 - min(1, k)), mask, person, fade)
+    elif st == "slam":  # слово «падає» на екран з величезного розміру й приземляється з поштовхом
+        sz = fit_size(txt, FONT_BIG, W * 0.92, hi=480); spr = sprite(txt, sz, FONT_BIG, ev["fill"], stroke=4, stroke_fill=(10, 10, 10))
+        q = min(1.0, dt / 0.16); sc = 2.4 - 1.4 * (1 - (1 - q) ** 4)
+        land = max(0.0, dt - 0.16); shake = 14 * math.exp(-land / 0.06) if dt >= 0.16 else 0
+        jx = rc.setdefault(("sx", id(ev)), random.choice([-1, 1])) * shake
+        blend(frame, warp(glow(spr, acc, 16), sc * pulse), W / 2 + jx, cy, mask, person, 0.5 * fade * q)
+        blend(frame, warp(spr, sc * pulse), W / 2 + jx, cy, mask, person, fade * min(1.0, q * 1.5))
+    elif st == "waterfall":  # слова піднімаються знизу по черзі (stagger ≤ 0.4 с)
+        words = txt.split()
+        sz = fit_size(max(words, key=len), FONT_BIG, W * 0.86, hi=300)
+        lh = sz * 0.95; y0 = cy - (len(words) - 1) * lh / 2
+        for i, wd in enumerate(words):
+            q = (dt - i * min(0.12, 0.4 / max(1, len(words)))) / 0.3
+            if q <= 0: continue
+            e = 1 - (1 - min(1.0, q)) ** 4
+            spr = sprite(wd, sz, FONT_BIG, acc if i % 2 else white)
+            blend(frame, spr, W / 2, y0 + i * lh + 120 * (1 - e), mask, person, fade * min(1.0, q * 2))
+    else:  # rgb — велике слово з кольоровими «привидами»
+        sz = fit_size(txt, FONT_BIG, W * 0.85, hi=420); spr = sprite(txt, sz, FONT_BIG, white)
+        jit = 14 * (1 - min(1, dt / 0.3)) + 6 * beat_pulse
+        blend(frame, warp(tint(spr, (255, 220, 0)), pulse), W / 2 + jit, H * 0.36, None, False, 0.6 * fade)
+        blend(frame, warp(tint(spr, (60, 40, 255)), pulse), W / 2 - jit, H * 0.36, None, False, 0.6 * fade)
+        blend(frame, warp(spr, pulse), W / 2, H * 0.36, None, False, fade)
 
 
 def style_events(ev, rnd, behind_ok):
-    styles = (["behind"] * 3 + ["stack"] * 2 + ["orbit"] * 2 + ["pop"] * 2 + ["side", "type"]) if behind_ok else ["pop", "stack", "type", "behind"]
-    last = None
+    pool = (["behind", "behind", "slam", "slam", "stack", "orbit", "orbit", "pop", "split", "wipe", "side", "cascade", "rgb"] if behind_ok
+            else ["slam", "slam", "stack", "split", "wipe", "cascade", "rgb", "pop", "behind"])
+    last = []
     for k, e in enumerate(ev):
-        s = rnd.choice([x for x in styles if x != last] or styles)
-        if s == "orbit" and len(e["txt"]) > 10: s = "behind"
-        e["style"] = s; last = s
-        e["color"] = ACCENTS[k % len(ACCENTS)] if rnd.random() < 0.7 else ACCENTS[0]
-        e["fill"] = (245, 245, 245) if rnd.random() < 0.7 else e["color"]
+        opts = [x for x in pool if x not in last[-2:]] or pool
+        s = rnd.choice(opts)
+        if s in ("orbit", "cascade") and len(e["txt"]) > 9: s = "behind"
+        if len(e["txt"].split()) >= 2 and rnd.random() < 0.5: s = "waterfall"
+        e["style"] = s; last.append(s)
+        e["color"] = ACCENTS[(k * 2 + rnd.randrange(2)) % len(ACCENTS)]
+        e["fill"] = (246, 246, 246) if rnd.random() < 0.65 else e["color"]
     return ev
+
+
+# ------------------------------------------------------------------ ефекти кадру
+def zoom_frame(fr, z, ang=0.0, dx=0.0, dy=0.0, cx=None, cy=None):
+    cv2 = _cv2()
+    M = cv2.getRotationMatrix2D((cx or W / 2, cy or H * 0.45), ang, z); M[0, 2] += dx; M[1, 2] += dy
+    return cv2.warpAffine(fr, M, (W, H), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT)
+
+
+def zoom_blur(fr, strength):
+    acc = fr.astype(np.float32)
+    for i in range(1, 4):
+        acc += zoom_frame(fr, 1 + strength * i / 3).astype(np.float32)
+    return (acc / 4).astype(np.uint8)
+
+
+def glitch(fr, rnd, amt):
+    cv2 = _cv2(); out = fr.copy()
+    for _ in range(int(6 * amt) + 2):
+        y = rnd.randrange(0, H - 40); h = rnd.randrange(20, 160); s = rnd.randrange(-int(90 * amt) - 1, int(90 * amt) + 2)
+        out[y:y + h] = np.roll(out[y:y + h], s, axis=1)
+    b, g, r = cv2.split(out); d = int(18 * amt) + 1
+    return cv2.merge([np.roll(b, d, 1), g, np.roll(r, -d, 1)])
+
+
+def leak_layer(rnd):
+    """Кольоровий світловий відблиск (light leak) — один на кліп, рухається."""
+    cv2 = _cv2(); lw, lh = W // 4, H // 4
+    yy, xx = np.mgrid[0:lh, 0:lw].astype(np.float32)
+    cx, cy = rnd.uniform(0, lw), rnd.uniform(0, lh * 0.5); r = rnd.uniform(lw * 0.5, lw)
+    m = np.exp(-(((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * r * r)))
+    col = rnd.choice([(40, 120, 255), (60, 60, 255), (200, 80, 255), (30, 200, 255)])
+    img = np.zeros((lh, lw, 3), np.float32)
+    for c in range(3): img[..., c] = m * col[c]
+    return cv2.resize(img, (W, H), interpolation=cv2.INTER_LINEAR)
 
 
 # ------------------------------------------------------------------ головна функція
 def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
+    import json as _json
     cv2 = _cv2()
     d = Path(d); wk = d / "out" / "_e"; wk.mkdir(parents=True, exist_ok=True)
     rnd = random.Random(seed or 1); random.seed(seed or 1)
-    music = o.get("music"); start = float(o.get("music_start") or 0)
-    mlen = music_dur(music) if music else 0
-    L = float(min(max(5.0, float(o.get("edit_sec") or 15)), max(5.0, mlen - start - 0.2) if mlen else 60))
-    job.step("edit_beats", 60)
+    music = o.get("music"); mlen = music_dur(music) if music else 0
+    want = max(5.0, float(o.get("edit_sec") or 15))
+    if o.get("music_start") in (None, "", "auto"):  # авто: найсильніший шматок треку (приспів / дроп)
+        start = best_segment(music, min(want, max(5.0, mlen - 0.5)), mlen) if mlen > want + 2 else 0.0
+        job.log("edit_music_start", round(start, 1))
+    else:
+        start = float(o.get("music_start") or 0)
+    L = float(min(want, max(5.0, mlen - start - 0.2) if mlen else 60))
+    o["_music_start"] = start
+    job.step("edit_beats", 58)
     m = analyze_music(music, start, L)
-    words = None
-    if (o.get("edit_textmode") or "lyrics") == "lyrics":
+    # ---- картинка джерела: найцікавіші кадри (обличчя, різкість, колір), без реклами
+    vpool = None
+    if meta.get("video"):
+        cache = d / "vscan.json"
+        if cache.exists():
+            vpool = _json.loads(cache.read_text())
+        else:
+            job.step("edit_scan", 60)
+            vpool = scan_video(meta["video"], meta.get("duration") or 0, skip=(meta.get("info") or {}).get("skip") or [], job=job)
+            cache.write_text(_json.dumps(vpool))
+        for v in vpool:  # моменти, де щось відбувається за звуком/чатом, — трохи вище
+            if any(abs(v["t"] - c["peak"]) < 4 for c in pool if c.get("final", 0) > 0.5): v["score"] += 0.6
+        if len(vpool) < 8: vpool = None
+    shots = plan_shots(m, L, pool, rnd, vpool)
+    # ---- текст
+    tm = o.get("edit_textmode") or "lyrics"
+    ev = []
+    if tm == "lyrics":
         job.step("edit_lyrics", 62); words = lyrics(music, start, L, o, job)
-    ev = text_events(m, o, L, rnd, words) if (o.get("edit_textmode") or "lyrics") != "none" else []
-    shots = plan_shots(m, L, pool, rnd)
+        if len(words) >= max(3, L / 4): ev = text_events(m, o, L, rnd, words)
+        else: job.log("edit_nolyrics")
+    elif tm == "custom":
+        ev = text_events(m, o, L, rnd, None)
+    if tm != "none" and len(ev) < L / 2.2:  # мало слів — додаємо фрази стрімера з цих кадрів
+        extra = speech_events(shots, meta, o, job, L, rnd)
+        ev = sorted(ev + [e for e in extra if all(not (x["t0"] - 0.1 < e["t0"] < x["t1"]) for x in ev)], key=lambda e: e["t0"])
+        if len(ev) < L / 3 and ev:  # усе ще мало — повторюємо найкращі слова на сильних долях
+            pool_w = [e["txt"] for e in ev]
+            free = [s for s in shots if s["hard"] and all(not (x["t0"] - 0.05 < s["a"] < x["t1"]) for x in ev)]
+            for s in free: ev.append({"t0": s["a"], "t1": min(L, s["b"]), "txt": rnd.choice(pool_w)})
+            ev.sort(key=lambda e: e["t0"])
+    if tm != "none" and not ev:  # останній запас: слова з назви відео в такт
+        import re as _re
+        title = (meta.get("info") or {}).get("title") or ""
+        toks = [w for w in _re.findall(r"[\w'’]+", title) if len(w) >= 3][:8] or ([o.get("nick")] if o.get("nick") else [])
+        if toks: ev = text_events(m, {"edit_text": " ".join(toks)}, L, rnd, None)
+    for k, e in enumerate(ev):
+        if k + 1 < len(ev): e["t1"] = min(e["t1"], ev[k + 1]["t0"])
+    ev = [e for e in ev if e["t1"] - e["t0"] >= 0.15]
     job.log("edit_plan", len(shots), round(60 / max(0.2, m["period"])), len(ev))
-    # джерела моментів (для стрімів — шматки з запасом)
+    # ---- джерела кадрів
     srcs = {}
 
     def src_of(k):
         if k not in srcs:
             c = pool[k]; s0 = max(0.0, c["peak"] - 6)
-            src, off = segment(d, meta, s0, c["peak"] + 6, f"e{k}_{int(s0)}", job, pad=1)
-            srcs[k] = (src, off, s0)
+            srcs[k] = (*segment(d, meta, s0, c["peak"] + 6, f"e{k}_{int(s0)}", job, pad=1), s0)
         return srcs[k]
     cam = o.get("cam") if o.get("layout") == "cam" else None
     logos = []
@@ -460,80 +729,98 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     done = [0]
 
     def one(i):
-        sh = shots[i]; src, off, s0 = src_of(sh["k"])
-        # для стрімів з вебкою: чергуємо крупний план вебки і гру
-        r = render_shot(src, max(0.0, off + sh["t"] - s0), sh, o, job, wk / f"s{i:03d}.mp4", cam=cam if (cam and i % 3 != 2) else None,
-                      logos=logos if meta.get("video") else None)
+        sh = shots[i]
+        if sh["k"] < 0: src, ft = meta["video"], sh["t"] - meta.get("video_offset", 0.0)
+        else:
+            src, off, s0 = src_of(sh["k"]); ft = max(0.0, off + sh["t"] - s0)
+        r = render_shot(src, ft, sh, o, job, wk / f"s{i:03d}.mp4", cam=cam if (cam and i % 3 != 2) else None,
+                        logos=logos if meta.get("video") else None)
         done[0] += 1; job.pct = 64 + 14 * done[0] / len(shots); job.sub = f"{done[0]}/{len(shots)}"
         return r
     parts = _pmap(one, list(range(len(shots))), max(1, perf()["render"] + 1))
     # ---------------- покадровий прохід
     job.step("edit_fx", 78)
     seg = Segmenter() if o.get("edit_behind", True) else None
-    behind_ok = seg is not None and seg.net is not None and any(p["face"] for p in parts)
+    behind_ok = seg is not None and seg.net is not None
     ev = style_events(ev, rnd, behind_ok)
     out = d / "out" / name
     eargs = ["-c:v", "libx264", "-preset", "medium", "-crf", "15", "-tune", "film", "-profile:v", "high", "-level", "4.2",
              "-maxrate", "30M", "-bufsize", "60M", "-pix_fmt", "yuv420p", "-x264-params", "aq-mode=3"]
-    nfr_total = sum(p["n"] for p in parts)
+    nfr_total = sum(p["n"] for p in parts); T = nfr_total / FPS
     cmd = [ffmpeg(), "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-"]
     if music and not o.get("edit_mute"):
-        cmd += ["-ss", f"{start:.3f}", "-t", f"{nfr_total / FPS:.3f}", "-i", str(music), "-map", "0:v", "-map", "1:a",
-                "-af", f"afade=t=out:st={max(0, nfr_total / FPS - 0.6):.2f}:d=0.6", "-c:a", "aac", "-b:a", "192k", "-shortest"]
+        cmd += ["-ss", f"{start:.3f}", "-t", f"{T:.3f}", "-i", str(music), "-map", "0:v", "-map", "1:a",
+                "-af", f"afade=t=out:st={max(0, T - 0.6):.2f}:d=0.6", "-c:a", "aac", "-b:a", "192k", "-shortest"]
     cmd += eargs + ["-movflags", "+faststart", str(out)]
     pe = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-    hits = m["hits"]
-    sb = sorted(zip(m["strength"], m["beats"]), reverse=True); strong = {b for _, b in sb[:max(1, len(sb) // 6)]}
+    beats, hits = m["beats"], m["hits"]
+    sb = sorted(zip(m["strength"], m["beats"]), reverse=True); strong = {b for _, b in sb[:max(1, len(sb) // 5)]}
     nick = (o.get("nick") or "").strip().lstrip("@")
     wm = sprite(nick, 50, FONT_BOLD, (240, 240, 240), stroke=2, stroke_fill=(30, 30, 30)) if nick else None
     endc = sprite(nick.upper(), fit_size(nick.upper(), FONT_BIG, W * 0.7, hi=220), FONT_BIG, (245, 245, 245)) if nick else None
-    rc, fi, prev_last = {}, 0, None
+    rc, fi, prev = {}, 0, None
     try:
         for i, (sh, pr) in enumerate(zip(shots, parts)):
             job.check()
             pd = subprocess.Popen([ffmpeg(), "-v", "error", "-i", pr["file"], "-f", "rawvideo", "-pix_fmt", "bgr24", "-"], stdout=subprocess.PIPE)
             if seg: seg.reset()
             nxt = shots[i + 1] if i + 1 < len(shots) else None
+            leak = leak_layer(rnd) if rnd.random() < 0.3 else None
+            cur_idx, cur = -1, None
             for j in range(pr["n"]):
-                buf = pd.stdout.read(W * H * 3)
-                if len(buf) < W * H * 3:
-                    fr = prev_last.copy() if prev_last is not None else np.zeros((H, W, 3), np.uint8)
-                else:
-                    fr = np.frombuffer(buf, np.uint8).reshape(H, W, 3).copy()
+                want = ramp_index(j, pr["n"], pr["nsrc"], sh["ramp"]) if sh["ramp"] != "none" else j
+                while cur_idx < want:
+                    buf = pd.stdout.read(W * H * 3)
+                    if len(buf) < W * H * 3: break
+                    cur = np.frombuffer(buf, np.uint8).reshape(H, W, 3); cur_idx += 1
+                fr = cur.copy() if cur is not None else (prev.copy() if prev is not None else np.zeros((H, W, 3), np.uint8))
                 t = fi / FPS
-                # наїзд на ударі + повільний наїзд у кадрі
+                # ---- рух камери: пульс на кожну долю, удар, нахил, тряска, легке погойдування
+                lb = max([b for b in beats if b <= t + 1e-3], default=-9)
                 lh = max([h for h in hits if h <= t + 1e-3], default=-9)
-                z = 1 + 0.13 * math.exp(-(t - lh) / 0.11) if t - lh < 0.6 else 1.0
-                z *= 1 + 0.018 * j / max(1, pr["n"])
-                sx = sy = 0.0
-                if t - lh < 0.18 and lh in strong:
-                    amp = 22 * math.exp(-(t - lh) / 0.06); sx, sy = rnd.uniform(-amp, amp), rnd.uniform(-amp, amp)
-                if z > 1.002 or sx or sy:
-                    M = cv2.getRotationMatrix2D((W / 2, H * 0.45), 0, z); M[0, 2] += sx; M[1, 2] += sy
-                    fr = cv2.warpAffine(fr, M, (W, H), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT)
-                # змаз-перехід (whip)
-                if (sh["whip"] and j < 3) or (nxt and nxt["whip"] and j >= pr["n"] - 3):
-                    fr = cv2.blur(fr, (61, 1))
-                # RGB-зсув на сильних ударах
-                if sh["rgb"] and j < 5:
-                    dx = int(16 * (1 - j / 5)) or 1
-                    b, g, r = cv2.split(fr); fr = cv2.merge([np.roll(b, dx, 1), g, np.roll(r, -dx, 1)])
-                mask = seg(fr) if (seg and behind_ok and pr["face"]) else None
+                bp = math.exp(-(t - lb) / 0.09) if t - lb < 0.4 else 0.0
+                hp = math.exp(-(t - lh) / 0.12) if t - lh < 0.6 else 0.0
+                z = 1 + 0.05 * bp + 0.15 * hp + (0.02 * j / max(1, pr["n"]) if not sh.get("resolve") else 0.06 * j / max(1, pr["n"]))
+                kick = rc.setdefault(("k", lh), rnd.choice([-1, 1]))
+                ang = 2.2 * kick * hp
+                dx = dy = 0.0
+                if lh in strong and t - lh < 0.2:
+                    amp = 26 * math.exp(-(t - lh) / 0.07); dx, dy = rnd.uniform(-amp, amp), rnd.uniform(-amp, amp)
+                # ---- переходи з узгодженою швидкістю: рух не зупиняється на склейці
+                fx, nfx = sh["fx"], (nxt["fx"] if nxt else "cut")
+                tail = pr["n"] - 1 - j  # кадрів до кінця шоту
+                blur = 0.0; hblur = 0
+                if nfx == "zoom" and tail < 4:           # вихід: розгін наїзду
+                    q = (4 - tail) / 4; z *= 1 + 0.32 * q ** 2.2; blur = 0.10 * q
+                if fx == "zoom" and j < 5:                # вхід: продовжує наїзд і гальмує
+                    q = 1 - j / 5; z *= 1 - 0.2 * q ** 2.2; blur = max(blur, 0.08 * q)
+                if nfx == "whip" and tail < 3:            # вихід: розгін вліво
+                    q = (3 - tail) / 3; dx -= W * 0.22 * q ** 2.2; hblur = int(30 + 70 * q)
+                if fx == "whip" and j < 4:                # вхід: справа, гальмує
+                    q = 1 - j / 4; dx += W * 0.22 * q ** 2.2; hblur = max(hblur, int(30 + 70 * q))
+                if fx == "flash" and j < 4: z *= 1 + 0.12 * (1 - j / 4)
+                fr = zoom_frame(fr, z, ang, dx, dy)
+                if blur > 0.01: fr = zoom_blur(fr, blur)
+                if hblur: fr = cv2.blur(fr, (hblur | 1, 1))
+                if (fx == "glitch" and j < 3) or (nfx == "glitch" and tail < 2): fr = glitch(fr, rnd, 0.9 if j < 3 else 0.6)
+                if leak is not None:
+                    a = 0.32 * (0.5 + 0.5 * math.sin(t * 3 + i))
+                    fr = np.clip(fr.astype(np.float32) + leak * a, 0, 255).astype(np.uint8)
+                # ---- людина і текст
+                mask = seg(fr) if seg else None
                 head = head_of(mask) if mask is not None else None
                 for e in ev:
-                    if e["t0"] <= t < e["t1"]: draw_text(fr, e, t, mask if head else None, head, rc)
-                if wm is not None and t < nfr_total / FPS - 0.9: blend(fr, wm, W / 2, H * 0.80, None, False, 0.92)
-                # спалах на склейці
-                if sh["flash"] and j < 3:
-                    a = (0.75, 0.4, 0.15)[j]; fr = cv2.addWeighted(fr, 1 - a, np.full_like(fr, 255), a, 0)
-                T = nfr_total / FPS
-                if endc is not None and t >= T - 0.9:  # фінальна плашка з ніком, як у референсі
+                    if e["t0"] <= t < e["t1"]: draw_text(fr, e, t, mask if head else None, head, rc, bp)
+                if wm is not None and t < T - 0.9: blend(fr, wm, W / 2, H * 0.80, None, False, 0.92)
+                if fx == "flash" and j < 3:
+                    a = (0.85, 0.45, 0.15)[j]; fr = cv2.addWeighted(fr, 1 - a, np.full_like(fr, 255), a, 0)
+                if endc is not None and t >= T - 0.9:
                     q = (t - (T - 0.9)) / 0.9
                     fr = (fr * max(0.0, 1 - q * 2.2)).astype(np.uint8)
                     blend(fr, warp(endc, 1.12 - 0.12 * ease(q * 2)), W / 2, H / 2, None, False, min(1.0, q * 4))
                 elif t > T - 0.4:
                     fr = (fr * max(0.0, (T - t) / 0.4)).astype(np.uint8)
-                pe.stdin.write(fr.tobytes()); fi += 1; prev_last = fr
+                pe.stdin.write(fr.tobytes()); fi += 1; prev = fr
                 if fi % 15 == 0: job.pct = 78 + 20 * fi / nfr_total; job.sub = f"{fi}/{nfr_total}"
             pd.stdout.close(); pd.wait()
         pe.stdin.close()
@@ -543,6 +830,6 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
         except Exception: pass
         raise
     for p in parts: Path(p["file"]).unlink(missing_ok=True)
-    subprocess.run([ffmpeg(), "-y", "-v", "error", "-ss", f"{min(1.5, nfr_total / FPS / 2):.2f}", "-i", str(out), "-frames:v", "1",
+    subprocess.run([ffmpeg(), "-y", "-v", "error", "-ss", f"{min(1.5, T / 2):.2f}", "-i", str(out), "-frames:v", "1",
                     "-vf", "scale=360:-2", str(out.with_name(out.stem + "_preview.jpg"))], capture_output=True)
-    return str(out), nfr_total / FPS
+    return str(out), T

@@ -1,5 +1,5 @@
 // StreamClipper UI. Стан: P (перевірене посилання), CH (канал), cur (поточна задача).
-const UIV='2.3.1';const $=id=>document.getElementById(id);
+const UIV='2.4.0';const $=id=>document.getElementById(id);
 let THFAIL=false,LANG='uk',SET={},P=null,CH=null,cur={},img=null,cam=[0,0,.25,.25],poll=null,WEDIT=false,WLIST=[],NOTIFIED={};
 const st={etm:'lyrics',egrade:'warm',sspeed:'auto',mode:'best',layout:'blur',per:'30',typ:'archive',sp:'classic',ss:'m',spos:'auto',sw:'3',slang:'uk'};
 const t=(k,...a)=>{let s=(I18N[LANG]||I18N.uk)[k];if(s===undefined)s=I18N.uk[k]??k;return s.replace(/\{(\d)\}/g,(_,i)=>a[i]??'')};
@@ -94,14 +94,14 @@ function opts(){const kw=$('x_kw').checked?$('kw').value:'';
   live_minutes:+$('livem').value,live_every:+$('livee').value,speech_filter:$('x_speech').checked,review:$('x_review').checked,
   censor:$('x_censor').checked,censor_mode:$('x_censor_mode').value,hook:$('x_hook').checked,zoom:$('x_zoom').checked,watermark:$('x_wm').checked,
   cover:$('x_cover').checked,denoise:$('x_denoise').checked,compile_min:st.mode==='compile'?Math.max(1,+$('cnt').value||8):8,teaser_sec:st.mode==='teaser'?Math.min(90,Math.max(10,+$('cnt').value||30)):30,
-  edit_sec:st.mode==='edit'?Math.min(60,Math.max(5,+$('cnt').value||15)):15,music:EM?EM.path:null,music_start:+$('emstart').value||0,edit_textmode:st.etm,edit_text:$('etext').value,
+  edit_sec:st.mode==='edit'?Math.min(60,Math.max(5,+$('cnt').value||15)):15,music:EM?EM.path:null,music_start:$('emstart').value===''?null:+$('emstart').value,edit_textmode:st.etm,edit_text:$('etext').value,
   edit_grade:st.egrade,nick:$('enick').value.trim(),edit_behind:$('ebehind').checked,edit_delogo:$('edelogo').checked,edit_mute:$('emute').checked,vclips:$('x_vclips').checked,history:$('x_hist').checked,
   gpu:$('x_gpu').checked,keywords:kw,sub_style:{preset:st.sp,size:st.ss,pos:st.spos,words:+st.sw,caps:$('scaps').checked,font:$('sfont').value}}}
 function plan(){if(!P)return;const i=P.info,o=opts(),live=['live','live_vod'].includes(i.kind);
   const dur=live?(o.live_minutes||120)*60+(i.duration||0):(i.duration||0),avg=(o.min_len+o.max_len)/2;let n,L=[],mb=0,min=0;const sp={base:.06,small:.13,medium:.35}[o.model]||.13;
   if(live&&i.kind==='live'){L.push(t('pl_live'));mb+=(o.live_minutes||120)/60*3000}
   if(o.mode==='edit'&&st.layout==='blur'){st.layout='full';mark('layout','layout')}
-  if(o.mode==='edit'){const len=EM?Math.min(o.edit_sec,EM.dur-o.music_start):o.edit_sec;n=Math.round(len/0.55);
+  if(o.mode==='edit'){const len=EM?Math.min(o.edit_sec,EM.dur-(o.music_start||0)):o.edit_sec;n=Math.round(len/0.55);
     if(['twitch'].includes(i.platform)){L.push(t('pl_audio'));mb+=dur/3600*70}else if(i.platform!=='file'){L.push(t('pl_video'));mb+=dur/3600*1800}
     L.push(t(i.has_chat?'pl_chat':'pl_loud'));L.push(t('pl_edit',n));if(o.edit_textmode!=='none')L.push(t(o.edit_textmode==='lyrics'?'pl_edit_lyrics':'pl_edit_custom'));if(o.edit_behind)L.push(t('pl_behind'));
     min+=dur/60*.02+20*1.5*65/60*sp+len*(o.edit_behind?.25:.12)+(o.edit_textmode==='lyrics'?len*sp*.5/60:0);mb+=40+len*2;

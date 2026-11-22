@@ -60,7 +60,7 @@ class Job:
 DEFAULTS = {"mode": "auto", "min_len": 60, "max_len": 90, "max_clips": 40, "min_score": 2.0, "layout": "blur", "cam": None,
             "subs": True, "model": None, "lang": None, "live_minutes": 0, "skip_start": 180, "seq_limit": 0,
             "speech_filter": True, "review": False, "censor": False, "censor_mode": "beep", "sub_style": {},
-            "hook": False, "zoom": False, "watermark": False, "cover": False, "denoise": False, "compile": False, "compile_min": 8, "teaser_sec": 30, "music": None, "music_start": 0, "edit_sec": 15, "edit_textmode": "lyrics", "edit_text": "", "edit_grade": "warm", "edit_behind": True, "edit_mute": False, "nick": "", "edit_delogo": True,
+            "hook": False, "zoom": False, "watermark": False, "cover": False, "denoise": False, "compile": False, "compile_min": 8, "teaser_sec": 30, "music": None, "music_start": None, "edit_sec": 15, "edit_textmode": "lyrics", "edit_text": "", "edit_grade": "warm", "edit_behind": True, "edit_mute": False, "nick": "", "edit_delogo": True,
             "vclips": False, "keywords": [], "history": None, "gpu": None, "live_every": 8}
 
 
@@ -306,6 +306,7 @@ def _chat(job, d, meta, info, a, b, o, background=False):
 def _select(job, d, meta, o, a, b, chat, used=(), audio=None, audio_off=0.0, p0=35, p1=65):
     """Анализ окна [a,b] таймлайна; возвращает отобранные клипы."""
     if audio is None: audio, audio_off = meta["audio"], meta.get("audio_offset", 0.0)
+    used = list(used) + [tuple(x) for x in (meta.get("info") or {}).get("skip", [])]  # реклама (SponsorBlock) — не брати
     job.step("analyze", p0)
     pf = perf()
     loud = loudness_par(audio, int(math.ceil(b - a)) + 1, job, start=a - audio_off, dur=b - a, parts=pf["loud"])
