@@ -1,5 +1,5 @@
 # StreamClipper — локальный сервер + интерфейс в браузере.
-import io, json, mimetypes, os, secrets, shutil, socket, subprocess, sys, tempfile, threading, time, urllib.request, uuid, webbrowser, zipfile
+import io, json, mimetypes, os, secrets, shutil, socket, subprocess, sys, threading, time, urllib.request, uuid, webbrowser, zipfile
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -73,11 +73,13 @@ def restart():
 
 
 def update_check():
-    j = C.http_json(f"https://api.github.com/repos/{C.REPO}/releases/latest", timeout=20)
-    tag = (j.get("tag_name") or "").lstrip("v")
-    asset = next((a["browser_download_url"] for a in j.get("assets", []) if a["name"].endswith(".zip")), None)
-    return {"current": C.VERSION, "latest": tag, "newer": bool(tag) and tag != C.VERSION and _ver(tag) > _ver(C.VERSION),
-            "url": asset or j.get("zipball_url"), "notes": (j.get("body") or "")[:1500]}
+    """Остання версія = файл VERSION у гілці main (реліз не обов'язковий)."""
+    raw = f"https://raw.githubusercontent.com/{C.REPO}/main/VERSION"
+    with urllib.request.urlopen(urllib.request.Request(raw, headers={"User-Agent": "StreamClipper", "Cache-Control": "no-cache"}),
+                                timeout=20, context=C.ssl_ctx()) as r:
+        tag = r.read().decode().strip().lstrip("v")
+    return {"current": C.VERSION, "latest": tag, "newer": bool(tag) and _ver(tag) > _ver(C.VERSION),
+            "url": f"https://codeload.github.com/{C.REPO}/zip/refs/heads/main"}
 
 
 def _ver(v):

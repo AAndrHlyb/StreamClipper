@@ -17,7 +17,7 @@
 
 ## Запуск
 
-1. Завантаж `StreamClipper.zip` з [Releases](https://github.com/AAndrHlyb/StreamClipper/releases/latest) і розпакуй
+1. [Завантаж ZIP](https://github.com/AAndrHlyb/StreamClipper/archive/refs/heads/main.zip) і розпакуй
 2. **Windows** — двічі клікни `Start-Windows.bat`. Якщо Windows пише «Захистила ваш комп'ютер» → «Докладніше» → «Виконати однаково»
 3. **Mac** — правий клік на `Start-Mac.command` → «Відкрити» → «Відкрити» (лише першого разу)
 
