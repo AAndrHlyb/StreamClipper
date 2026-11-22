@@ -34,6 +34,45 @@ def lan_ip():
         return "127.0.0.1"
 
 
+def lan_ips():
+    """Усі локальні IPv4 цього комп'ютера, основна першою."""
+    out = []
+    main = lan_ip()
+    if main != "127.0.0.1": out.append(main)
+    try:
+        for a in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = a[4][0]
+            if ip not in out and not ip.startswith(("127.", "169.254.")): out.append(ip)
+    except Exception:
+        pass
+    return out or ["127.0.0.1"]
+
+
+FW_RULE = "StreamClipper"
+
+
+def fw_ok():
+    """Windows: чи є правило брандмауера для порту (None — не Windows)."""
+    if not C.IS_WIN: return None
+    code, out, _ = C.capture(["netsh", "advfirewall", "firewall", "show", "rule", f"name={FW_RULE}"], timeout=15)
+    return code == 0 and str(PORT) in out
+
+
+def fw_allow():
+    """Windows: одне вікно UAC — прибирає блокування Python (якщо колись натиснули «Скасувати») і відкриває порт у всіх мережах."""
+    if not C.IS_WIN: return True
+    progs = {sys.executable, getattr(sys, "_base_executable", sys.executable)}
+    lines = ["@echo off", "chcp 65001 >nul", f'netsh advfirewall firewall delete rule name="{FW_RULE}" >nul 2>&1']
+    for pr in progs:
+        lines.append(f'netsh advfirewall firewall delete rule name=all dir=in program="{pr}" >nul 2>&1')
+    lines.append(f'netsh advfirewall firewall add rule name="{FW_RULE}" dir=in action=allow protocol=TCP localport={PORT} profile=any')
+    f = C.OUT_ROOT / "_fw.cmd"; f.write_bytes(("\r\n".join(lines) + "\r\n").encode("utf-8"))
+    C.capture(["powershell", "-NoProfile", "-Command", f"Start-Process -FilePath '{f}' -Verb RunAs -WindowStyle Hidden -Wait"], timeout=180)
+    try: f.unlink()
+    except Exception: pass
+    return fw_ok()
+
+
 def allowed(p):
     p = Path(p).resolve()
     roots = [C.OUT_ROOT.resolve()] + [Path(i["url"]).resolve().parent for i in INFOS.values() if i.get("platform") == "file"]
@@ -107,9 +146,13 @@ def update_apply():
 def qr_svg(text):
     try:
         import segno
-        buf = io.BytesIO(); segno.make(text, error="m").save(buf, kind="svg", scale=6, border=2, dark="#ededed", light="#19191b"); return buf.getvalue()
+        buf = io.BytesIO(); segno.make(text, error="m").save(buf, kind="svg", scale=8, border=4, dark="#000000", light="#ffffff", omitsize=True); return buf.getvalue()
     except Exception:
         return None
+
+
+FAVICON = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect x="8" y="2" width="16" height="28" rx="4" fill="#ededed"/>'
+           b'<rect x="11" y="18" width="10" height="4" rx="1" fill="#ffe500"/></svg>')
 
 
 class H(BaseHTTPRequestHandler):
@@ -142,6 +185,8 @@ class H(BaseHTTPRequestHandler):
             if u.path in ("/", "/index.html"):
                 extra = {"Set-Cookie": f"sc_t={q['t'][0]}; Path=/; SameSite=Strict; Max-Age=31536000"} if q.get("t") else None
                 return self.send(200, UI.read_bytes(), "text/html; charset=utf-8", extra)
+            if u.path == "/favicon.ico":
+                return self.send(200, FAVICON, "image/svg+xml", {"Cache-Control": "max-age=86400"})
             if u.path == "/font":
                 return self.send(200, C.FONT.read_bytes(), "font/ttf", {"Cache-Control": "max-age=86400"})
             if u.path.startswith("/ui/"):
@@ -167,10 +212,11 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, {"list": C.settings().get("watch") or [], "status": WATCH.status if WATCH else {}})
             if u.path == "/api/update": return self.send(200, update_check())
             if u.path == "/api/lan":
-                s = C.settings(); url = f"http://{lan_ip()}:{PORT}/?t={s.get('token')}"
-                svg = qr_svg(url) if s.get("lan") else None
-                return self.send(200, {"on": bool(s.get("lan")), "url": url if s.get("lan") else None, "svg": svg.decode() if svg else None,
-                                       "active": bool(os.environ.get("SC_LAN_ACTIVE"))})
+                s = C.settings(); on = bool(s.get("lan")); ips = lan_ips()
+                urls = [f"http://{ip}:{PORT}/?t={s.get('token')}" for ip in ips] if on else []
+                svg = qr_svg(urls[0]) if urls else None
+                return self.send(200, {"on": on, "url": urls[0] if urls else None, "alt": urls[1:], "svg": svg.decode() if svg else None,
+                                       "active": bool(os.environ.get("SC_LAN_ACTIVE")), "fw": fw_ok() if on else None})
             if u.path == "/file":
                 return self.file((q.get("p") or [""])[0], bool(q.get("dl")))
             if u.path == "/thumb":
@@ -223,14 +269,18 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, {"path": str(dest)})
             if p == "/api/detect_cam":
                 info = INFOS[b["pid"]]; d = info.get("duration") or 0; tmp = C.OUT_ROOT / "_frames"; tmp.mkdir(parents=True, exist_ok=True)
-                fr = []
-                for k, t in enumerate([d * 0.25, d * 0.5, d * 0.75] if d else [0]):
-                    dest = tmp / f"{b['pid']}_det{k}.jpg"
+                from concurrent.futures import ThreadPoolExecutor
+                def grab(kt):
+                    k, t = kt; dest = tmp / f"{b['pid']}_det{k}.jpg"
                     try:
                         if not dest.exists(): S.frame_at(info, t, dest)
-                        fr.append(dest)
+                        return dest if dest.exists() else None
                     except Exception:
-                        pass
+                        return None
+                ts = [d * x for x in (0.2, 0.4, 0.6, 0.8)] if d else [0]
+                first = grab((0, ts[0]))  # перший кадр кешує посилання на потік, решта паралельно
+                with ThreadPoolExecutor(3) as ex: fr = [f for f in [first, *ex.map(grab, list(enumerate(ts))[1:])] if f]
+                if not fr: return self.send(400, {"error": "frame_fail"})
                 return self.send(200, {"cam": R.detect_cam(fr)})
             if p == "/api/start":
                 info = INFOS.get(b.get("pid"))
@@ -277,9 +327,12 @@ class H(BaseHTTPRequestHandler):
                 upd = {k: v for k, v in b.items() if k in C.DEFAULT_SETTINGS}
                 if upd.get("lan") and not C.settings().get("token"): upd["token"] = secrets.token_urlsafe(12)
                 s = C.save_settings(upd)
+                if upd.get("lan") and fw_ok() is False: fw_allow()  # Windows спитає дозвіл (UAC) один раз
                 if "lan" in upd and bool(upd["lan"]) != bool(os.environ.get("SC_LAN_ACTIVE")) and b.get("restart"):
                     threading.Thread(target=restart, daemon=True).start()
                 return self.send(200, {k: v for k, v in s.items() if k != "learn"})
+            if p == "/api/firewall":
+                return self.send(200, {"fw": fw_allow()})
             if p == "/api/profile":
                 s = C.settings(); prof = s.get("profiles") or {}
                 name = (b.get("name") or "").lower()

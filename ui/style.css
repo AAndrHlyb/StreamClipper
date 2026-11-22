@@ -162,7 +162,11 @@ pre.log{background:var(--deep);border:1px solid var(--line);border-radius:8px;pa
 .srow{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:16px 0;border-bottom:1px solid var(--line)}
 .srow:last-child{border-bottom:0}
 .srow b{font-weight:500}
-.qr{padding:16px 0;display:flex;gap:20px;align-items:center}
-.qr svg{width:180px;height:180px;border-radius:12px}
+.qr{padding:16px 0;display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap}
+.qrimg{width:220px;height:220px;flex:none;background:#fff;border-radius:12px;overflow:hidden}
+.qrimg svg{width:100%;height:100%;display:block}
+.qrt{flex:1;min-width:220px;display:flex;flex-direction:column;gap:6px}
+.qrt .tc{word-break:break-all;color:var(--t1)}
+.hint.warn{color:#f0b43c}
 @media (max-width:860px){main{padding:16px}.info,.lay{grid-template-columns:1fr}.phone{margin:auto}header{padding:0 12px;gap:8px;flex-wrap:wrap;height:auto;min-height:56px}nav{margin:0;overflow:auto}.status{display:none}.v .ty{display:none}.rv{grid-template-columns:auto 1fr}.rv .ctl{grid-column:1/-1;flex-wrap:wrap}}
 .av.ini{display:grid;place-items:center;font-weight:500;color:var(--t2)}

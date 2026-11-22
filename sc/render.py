@@ -256,32 +256,67 @@ def compilation(d, meta, clips, o, job, max_min=8):
 
 
 # ------------------------------------------------------------------ автопоиск вебки
-def detect_cam(frames):
-    """Ищет лицо в углах кадра (OpenCV, ставится при первом использовании). -> [x,y,w,h] или None."""
+def _cv2():
     try:
         import cv2
+        if (Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml").exists(): return cv2
     except Exception:
-        import subprocess, sys
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check", "opencv-python-headless"], capture_output=True)
-        try: import cv2
-        except Exception: return None
-    casc = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        pass
+    import subprocess, sys  # OpenCV 5 прибрав каскади — потрібна 4.x
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check", "opencv-python-headless>=4.8,<5"], capture_output=True)
+    for m in [k for k in sys.modules if k == "cv2" or k.startswith("cv2.")]: del sys.modules[m]
+    import cv2
+    if not (Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml").exists(): raise RuntimeError("OpenCV: no face models")
+    return cv2
+
+
+def detect_cam(frames):
+    """Шукає вебку: обличчя (OpenCV Haar, анфас і профіль) + постійні краї рамки по кількох кадрах. -> [x,y,w,h] або None."""
+    cv2 = _cv2()
+    casc = [cv2.CascadeClassifier(cv2.data.haarcascades + n) for n in ("haarcascade_frontalface_default.xml", "haarcascade_profileface.xml")]
+    imgs = [i for i in (cv2.imdecode(np.fromfile(str(f), np.uint8), cv2.IMREAD_COLOR) for f in frames) if i is not None]  # imread не читає кирилицю в шляху
+    if not imgs: return None
+    H, W = imgs[0].shape[:2]; imgs = [cv2.resize(i, (W, H)) for i in imgs]
     hits = []
-    for f in frames:
-        img = cv2.imread(str(f))
-        if img is None: continue
-        H, W = img.shape[:2]
+    for img in imgs:
         g = cv2.equalizeHist(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
-        for (x, y, w, h) in casc.detectMultiScale(g, 1.1, 5, minSize=(int(W * 0.03), int(W * 0.03))):
-            if w > W * 0.35: continue  # лицо на весь экран — это не вставка вебки
-            hits.append((x / W, y / H, w / W, h / H))
+        for c in casc:
+            for fl in (False, True):
+                gg = cv2.flip(g, 1) if fl else g
+                for (x, y, w, h) in c.detectMultiScale(gg, 1.1, 4, minSize=(int(W * 0.025),) * 2):
+                    if fl: x = W - x - w
+                    if w > W * 0.3: continue
+                    hits.append((x / W, y / H, w / W, h / H))
     if not hits: return None
-    # кластер с наибольшим числом попаданий
-    best = max(hits, key=lambda a: sum(1 for b in hits if abs(a[0] - b[0]) < 0.05 and abs(a[1] - b[1]) < 0.05))
-    grp = [b for b in hits if abs(best[0] - b[0]) < 0.05 and abs(best[1] - b[1]) < 0.05]
-    x, y, w, h = [sum(v) / len(grp) for v in zip(*grp)]
-    cx, cy = x + w / 2, y + h / 2
-    cw = min(0.45, w * 3.2)
-    ch = min(0.5, cw * (640 / 1080) * (16 / 9))  # пропорции верхней панели 1080x640 в кадре 16:9
+    near = lambda a, b: abs(a[0] - b[0]) < 0.05 and abs(a[1] - b[1]) < 0.06
+    best = max(hits, key=lambda a: sum(near(a, b) for b in hits))
+    grp = [b for b in hits if near(best, b)]
+    fx, fy, fw, fh = [float(np.median(v)) for v in zip(*grp)]
+    # постійні краї рамки вебки: середнє градієнтів по кадрах
+    gx = np.mean([np.abs(cv2.Sobel(cv2.cvtColor(i, cv2.COLOR_BGR2GRAY).astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)) for i in imgs], 0)
+    gy = np.mean([np.abs(cv2.Sobel(cv2.cvtColor(i, cv2.COLOR_BGR2GRAY).astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)) for i in imgs], 0)
+    thr = max(30.0, float(np.percentile(np.maximum(gx, gy), 90)))
+    X0, X1, Y0, Y1 = int(fx * W), int((fx + fw) * W), int(fy * H), int((fy + fh) * H)
+    cy0, cy1 = max(0, Y0 - (Y1 - Y0)), min(H, Y1 + (Y1 - Y0)); cx0, cx1 = max(0, X0 - (X1 - X0)), min(W, X1 + (X1 - X0))
+    def line(prof_fn, rng):
+        best, sc = None, 0.55
+        for p in rng:
+            s = prof_fn(p)
+            if s > sc: return p  # найближча до обличчя суцільна лінія
+        return best
+    rowf = lambda y: float(np.mean(np.max(gy[max(0, y - 1):y + 2, cx0:cx1], 0) > thr))
+    span = int(W * 0.35)
+    t = line(rowf, range(Y0 - 2, max(0, Y0 - span), -1)); b = line(rowf, range(Y1 + 2, min(H - 1, Y1 + span)))
+    # вертикальні краї перевіряємо по всій висоті рамки: справжня межа вебки суцільна, край крісла чи стіни — ні
+    ry0, ry1 = (t if t is not None else cy0) + 3, (b if b is not None else cy1) - 3
+    if ry1 - ry0 < 10: ry0, ry1 = cy0, cy1
+    colf = lambda x: float(np.mean(np.max(gx[ry0:ry1, max(0, x - 1):x + 2], 1) > thr)) * 0.55 / 0.8
+    l = line(colf, range(X0 - 2, max(0, X0 - span), -1)); r = line(colf, range(X1 + 2, min(W - 1, X1 + span)))
+    L = l if l is not None else 0; R = r if r is not None else W; T = t if t is not None else 0; B = b if b is not None else H
+    ok = (R - L) < W * 0.5 and (B - T) < H * 0.6 and (R - L) > fw * W * 1.5 and (B - T) > fh * H * 1.3
+    if ok and ((l is not None or L == 0) or (r is not None)) and (t is not None or b is not None):
+        return [round(L / W, 3), round(T / H, 3), round((R - L) / W, 3), round((B - T) / H, 3)]
+    cx, cy = fx + fw / 2, fy + fh / 2
+    cw = min(0.45, fw * 3.2); ch = min(0.5, cw * (640 / 1080) * (16 / 9))
     X, Y = min(max(0, cx - cw / 2), 1 - cw), min(max(0, cy - ch * 0.45), 1 - ch)
     return [round(X, 3), round(Y, 3), round(cw, 3), round(ch, 3)]

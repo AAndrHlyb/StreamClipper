@@ -273,14 +273,24 @@ def probe(url, live=False):
     return info
 
 
+_SRC = {}  # url -> (час, пряме посилання на потік), щоб кілька кадрів не питали yt-dlp кожен раз
+
+
+def _stream_url(url):
+    import time as _t
+    hit = _SRC.get(url)
+    if hit and _t.time() - hit[0] < 600: return hit[1]
+    code, out, err = capture([*YTDLP, "-g", "--no-warnings", "-f", "best[height<=720]/bv*[height<=720]/best", url], timeout=120)
+    if code: raise RuntimeError(err.strip()[-200:])
+    _SRC[url] = (_t.time(), out.split()[0]); return _SRC[url][1]
+
+
 def frame_at(info, t, dest):
     ff = ffmpeg()
     if info["platform"] == "file":
         src, seek = info["url"], max(0, t)
     else:
-        code, out, err = capture([*YTDLP, "-g", "--no-warnings", "-f", "best[height<=720]/bv*[height<=720]/best", info["url"]], timeout=120)
-        if code: raise RuntimeError(err.strip()[-200:])
-        src, seek = out.split()[0], (None if info.get("kind") == "live" else max(0, t))
+        src, seek = _stream_url(info["url"]), (None if info.get("kind") == "live" else max(0, t))
     cmd = [ff, "-y", "-v", "error", "-max_error_rate", "1"]
     if seek is not None: cmd += ["-ss", f"{seek:.1f}"]
     cmd += ["-i", src, "-frames:v", "1", "-vf", "scale=960:-2", str(dest)]

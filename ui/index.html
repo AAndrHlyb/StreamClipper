@@ -235,7 +235,7 @@
     <div class="srow"><div><b data-t="s_phone"></b><div class="hint" data-t="s_phone_d"></div><div class="hint hide" id="sphr"><span data-t="s_phone_restart"></span> <button class="ghost" onclick="saveSet({lan:document.getElementById('sphone').checked,restart:true}).then(()=>{document.getElementById('supd').textContent=t('s_restarting');setTimeout(()=>location.reload(),9000)})" data-t="restart"></button></div></div>
       <label class="tg"><input type="checkbox" id="sphone" onchange="phone(this.checked)"><i></i></label></div>
     <div class="qr hide" id="qr"></div>
-    <div class="srow"><b data-t="s_notif"></b><button class="ghost" id="snotif" onclick="Notification.requestPermission().then(loadSet)" data-t="s_notif_btn"></button></div>
+    <div class="srow"><b data-t="s_notif"></b><button class="ghost" id="snotif" onclick="window.Notification&&Notification.requestPermission().then(loadSet)" data-t="s_notif_btn"></button></div>
     <div class="srow"><div><b data-t="s_upd"></b> <span class="tc" id="sver"></span><div class="hint" id="supd"></div></div>
       <div class="row"><button class="ghost" onclick="updCheck()" data-t="s_upd_check"></button><button class="pri hide" id="supdgo" onclick="updGo()" data-t="s_upd_go"></button></div></div>
     <div class="srow"><div><b data-t="s_hw"></b><div class="tc" id="shw"></div></div><button class="ghost" onclick="autoTune()" data-t="s_auto"></button></div>

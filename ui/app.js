@@ -224,9 +224,15 @@ async function loadSet(){const h=await api('/api/health');SET=h.settings;const h
   $('squiet').checked=!!SET.quiet;$('sdisk').value=SET.disk_limit_gb||hw.disk_suggest;$('sdiskd').textContent=t('s_disk_d',hw.disk_suggest);$('shist').checked=!!SET.history;
   $('sphone').checked=!!SET.lan;$('shw').textContent=`${hw.cores} CPU · ${hw.ram} GB RAM · ${hw.gpu||'CPU'} · ${hw.free_gb} GB free`;
   $('snotif').textContent=t(window.Notification&&Notification.permission==='granted'?'s_notif_ok':'s_notif_btn');lan()}
-async function lan(){const r=await api('/api/lan');$('qr').classList.toggle('hide',!(r.on&&r.active&&r.svg));$('sphr').classList.toggle('hide',r.on===r.active);
-  if(r.svg)$('qr').innerHTML=r.svg+`<div class="tc">${esc(r.url)}</div>`}
-async function phone(on){await saveSet({lan:on});lan()}
+async function lan(){const r=await api('/api/lan');const box=$('qr');$('sphr').classList.toggle('hide',r.on===r.active);
+  box.classList.toggle('hide',!(r.on&&r.active&&r.svg));if(!(r.on&&r.active&&r.svg))return;
+  box.innerHTML=`<div class="qrimg">${r.svg}</div><div class="qrt"><div class="tc">${esc(r.url)}</div>
+    ${r.alt.length?`<div class="hint">${t('s_phone_alt')}</div>`+r.alt.map(u=>`<div class="tc">${esc(u)}</div>`).join(''):''}
+    ${r.fw===false?`<div class="hint warn">${t('s_fw_off')}</div><button class="ghost" onclick="fwAllow(this)">${t('s_fw_btn')}</button>`:''}
+    <div class="hint">${t('s_phone_help')}</div></div>`}
+async function fwAllow(b){b.disabled=true;b.textContent=t('s_fw_wait');await api('/api/firewall',{});lan()}
+async function phone(on){$('supd').textContent=t('s_restarting');try{await saveSet({lan:on,restart:true})}catch(e){}
+  $('supd').textContent=t('s_restarting');setTimeout(()=>location.reload(),7000)}
 async function autoTune(){const hw=await api('/api/hardware');await saveSet({model:hw.model,gpu:!!hw.gpu,disk_limit_gb:hw.disk_suggest});loadSet()}
 async function updCheck(){try{const u=await api('/api/update');$('supd').textContent=u.newer?t('s_upd_new',u.latest):t('s_upd_none');$('supdgo').classList.toggle('hide',!u.newer)}catch(e){$('supd').textContent=e.message}}
 async function updGo(){$('supd').textContent=t('s_upd_wait');try{await api('/api/update',{});setTimeout(()=>location.reload(),15000)}catch(e){$('supd').textContent=e.message}}

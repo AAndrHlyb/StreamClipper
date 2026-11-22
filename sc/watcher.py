@@ -44,6 +44,7 @@ class Watcher:
     """settings.watch = [{platform,name,url,enabled,avatar,display}]"""
     def __init__(self, start_job, active_live):
         self.start_job, self.active_live, self.status = start_job, active_live, {}
+        self.handled = set()  # ефіри, для яких задачу вже запускали (якщо користувач зупинив — не перезапускаємо до наступного ефіру)
         threading.Thread(target=self.loop, daemon=True).start()
 
     def loop(self):
@@ -61,8 +62,11 @@ class Watcher:
                     for x in lst:
                         if x["name"].lower() == w["name"].lower() and x["platform"] == w["platform"]: x["avatar"] = ci["avatar"]; x["display"] = ci.get("name")
                     save_settings({"watch": lst})
-                if ci.get("live") and w.get("enabled") and not self.active_live(key):
-                    if not was: notify("StreamClipper", f"{w.get('display') or w['name']} в ефірі")
+                if not ci.get("live"): self.handled.discard(key)
+                if ci.get("live") and w.get("enabled") and not self.active_live(key) and key not in self.handled:
+                    self.handled.add(key)
+                    on_air = {"ru": "в эфире", "en": "is live"}.get(settings().get("lang"), "в ефірі")
+                    if not was: notify("StreamClipper", f"{w.get('display') or w['name']} {on_air}")
                     try:
                         url = w.get("url") or (f"https://kick.com/{w['name']}" if w["platform"] == "kick" else f"https://www.twitch.tv/{w['name']}")
                         info = S.probe(url, live=True)
