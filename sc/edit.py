@@ -149,28 +149,50 @@ def lyrics(path, start, dur, o, job):
         langs = [(lang, prob)] + [(l, p) for l, p in (allp or [])[1:2] if p > 0.15]
     except Exception:
         langs = [(o.get("lang"), 0.0)]
+    def tx(audio, lang, off, vad=True, ctx=False):
+        segs, _ = mdl.transcribe(audio, language=lang, word_timestamps=True, beam_size=5, best_of=5, temperature=[0.0, 0.2, 0.4],
+                                 vad_filter=vad, vad_parameters={"threshold": 0.25, "min_silence_duration_ms": 300},
+                                 condition_on_previous_text=ctx, no_speech_threshold=0.6, compression_ratio_threshold=2.6,
+                                 hallucination_silence_threshold=2.0 if vad else None)
+        ws = []
+        for sg in segs:
+            for w in (sg.words or []):
+                t = w.word.strip().strip(",.!?…\"«»()[]")
+                if t and (w.probability or 0) > 0.08 and w.end > w.start:
+                    ws.append({"s": float(w.start) + off, "e": float(w.end) + off, "w": t, "p": float(w.probability or 0)})
+        return ws
+
     best, best_sc, best_lang = [], -1.0, None
     for lang, prob in langs[:2]:
+        try: ws = tx(y, lang, 0.0)
+        except Exception: continue
+        sc = sum(w["p"] for w in ws)
+        if sc > best_sc: best, best_sc, best_lang = ws, sc, lang
+    # ---- дірки: де голос звучить, а слів нема (Whisper на співі часто «губить» шматки) — доперевіряємо цей шматок окремо
+    sr = 16000; hop = 1600
+    rms = np.sqrt(np.convolve(y.astype(np.float32) ** 2, np.ones(hop) / hop, "valid")[::hop]) if len(y) > hop else np.zeros(1)
+    voiced = rms > max(0.02, np.percentile(rms, 60) * 0.5)
+    marks = [0.0] + sorted(w["s"] for w in best) + [len(y) / sr]
+    extra = []
+    for g0, g1 in zip(marks[:-1], marks[1:]):
+        if g1 - g0 < 2.2: continue
+        v = voiced[int(g0 * 10):int(g1 * 10)]
+        if not len(v) or v.mean() < 0.35: continue
+        a0, a1 = max(0.0, g0 - 0.3), min(len(y) / sr, g1 + 0.3)
         try:
-            segs, info = mdl.transcribe(y, language=lang, word_timestamps=True, beam_size=5, best_of=5, temperature=[0.0, 0.2, 0.4],
-                                        vad_filter=True, vad_parameters={"threshold": 0.3, "min_silence_duration_ms": 250},
-                                        condition_on_previous_text=True, no_speech_threshold=0.5, compression_ratio_threshold=2.6,
-                                        hallucination_silence_threshold=1.5)
-            ws = []
-            for sg in segs:
-                for w in (sg.words or []):
-                    t = w.word.strip().strip(",.!?…\"«»()[]")
-                    if t and (w.probability or 0) > 0.08 and w.end > w.start:
-                        ws.append({"s": float(w.start) + s0 - start, "e": float(w.end) + s0 - start, "w": t, "p": float(w.probability or 0)})
+            ws = tx(y[int(a0 * sr):int(a1 * sr)], best_lang, a0, vad=False)
+            extra += [w for w in ws if g0 + 0.05 < w["s"] < g1 - 0.05]
         except Exception:
-            continue
-        ws = [w for w in ws if -0.1 <= w["s"] < dur]
-        clean = []  # «зациклення» Whisper: одне слово 4+ рази підряд
-        for w in ws:
-            if len(clean) >= 2 and clean[-1]["w"].lower() == w["w"].lower() == clean[-2]["w"].lower(): continue
-            clean.append(w)
-        sc = sum(w["p"] for w in clean)
-        if sc > best_sc: best, best_sc, best_lang = clean, sc, lang
+            pass
+    best = sorted(best + extra, key=lambda w: w["s"])
+    for w in best: w["s"] += s0 - start; w["e"] += s0 - start
+    best = [w for w in best if -0.1 <= w["s"] < dur]
+    clean = []  # «зациклення» Whisper: одне слово 3+ рази підряд
+    for w in best:
+        if len(clean) >= 2 and clean[-1]["w"].lower() == w["w"].lower() == clean[-2]["w"].lower(): continue
+        if clean and abs(clean[-1]["s"] - w["s"]) < 0.05: continue
+        clean.append(w)
+    best = clean
     if best_lang: job.log("lyrics_lang", best_lang, len(best))
     return best
 
@@ -222,6 +244,42 @@ def _sample(src, t, pre, job):
     out = subprocess.run([ffmpeg(), "-v", "error", "-ss", f"{max(0, t):.2f}", "-i", str(src), "-frames:v", "1",
                           "-vf", (pre + "," if pre else "") + "scale=360:-2", "-f", "image2pipe", "-vcodec", "png", "-"], capture_output=True).stdout
     return cv2.imdecode(np.frombuffer(out, np.uint8), cv2.IMREAD_COLOR) if out else None
+
+
+def _bad_frame(src, t):
+    """Перевірка конкретного моменту шоту: чорний екран / титри / вшиті написи / сильний змаз. -> 0 (добре) .. 3 (погано)"""
+    cv2 = _cv2()
+    img = _sample(src, t, "", None)
+    if img is None: return 3
+    h0, w0 = img.shape[:2]
+    img = cv2.resize(img, (180, 320) if h0 > w0 else (320, 180), interpolation=cv2.INTER_AREA)
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    bad = 0
+    if float((g < 28).mean()) > 0.5: bad += 2
+    n, area = _text_lines(g)
+    if n >= 2 or area > 0.012: bad += 2
+    elif n == 1: bad += 1
+    if float(cv2.Laplacian(g, cv2.CV_32F).var()) < 25: bad += 1
+    return bad
+
+
+def verify_shots(shots, vpool, src, off, job=None):
+    """Кадри обирались за ключовими кадрами; тут перевіряємо саме ті секунди, що підуть у ролик (початок і середину шоту).
+    Поганий шот міняємо на наступного кандидата з пулу (теж перевіреного)."""
+    used = [sh["t"] for sh in shots]
+    cands = sorted(vpool, key=lambda c: -c["score"])
+    fixed = 0
+    for sh in shots:
+        span = (sh["b"] - sh["a"]) * sh["speed"]
+        def score_at(t): return max(_bad_frame(src, t - off + 0.1), _bad_frame(src, t - off + span * 0.7))
+        if job is not None: job.check()
+        if score_at(sh["t"]) < 2: continue
+        for c in cands:
+            t = max(0.0, c["t"] - 0.15)
+            if any(abs(t - u) < 3 for u in used): continue
+            if score_at(t) < 2:
+                used.append(t); sh["t"] = t; fixed += 1; break
+    return fixed
 
 
 _CASC = {}
@@ -907,18 +965,30 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     if (o.get("edit_grade") or "auto") == "auto": o["edit_grade"] = rnd.choice(style["grade"])
     job.log("edit_style", sname)
     shots = plan_shots(m, L, pool, rnd, vpool, style)
+    if vpool and meta.get("video"):
+        try:
+            nf = verify_shots(shots, vpool, meta["video"], meta.get("video_offset", 0.0), job)
+            if nf: job.log("edit_fixed", nf)
+        except Exception as e:
+            print("verify_shots:", e)
     print("edit plan:", " | ".join(f'{sh["sec"][:3]} {sh["fx"]}{"+" + sh["hit"] if sh.get("hit") else ""}{"/" + sh["look"] if sh.get("look") else ""}'
                                    f'{" BLACK" if sh.get("blackout") else ""}' for sh in shots), flush=True)
     # ---- текст
     tm = o.get("edit_textmode") or "lyrics"
-    ev = []
+    ev = []; sung = False
     if tm == "lyrics":
         job.step("edit_lyrics", 62); words = lyrics(music, start, L, o, job)
-        if len(words) >= 3: ev = text_events(m, o, L, rnd, words)
+        if len(words) >= 3: ev = text_events(m, o, L, rnd, words); sung = True
         else: job.log("edit_nolyrics")
     elif tm == "custom":
         ev = text_events(m, o, L, rnd, None)
-    if tm != "none" and len(ev) < L / 2.2:  # мало слів — додаємо фрази стрімера з цих кадрів
+    if sung and len(ev) < 5:  # слова пісні є, але їх мало — повторюємо їх на сильних долях (а не слова з відео)
+        pool_w = [e["txt"] for e in ev]
+        for sh in shots:
+            if sh["hard"] and all(not (x["t0"] - 0.6 < sh["a"] < x["t1"] + 0.6) for x in ev):
+                ev.append({"t0": sh["a"], "t1": min(L, sh["b"] + 0.3), "txt": rnd.choice(pool_w)})
+        ev.sort(key=lambda e: e["t0"])
+    if tm != "none" and not sung and len(ev) < L / 2.2:  # пісні без слів — додаємо фрази стрімера з цих кадрів
         extra = speech_events(shots, meta, o, job, L, rnd)
         ev = sorted(ev + [e for e in extra if all(not (x["t0"] - 0.1 < e["t0"] < x["t1"]) for x in ev)], key=lambda e: e["t0"])
         if len(ev) < L / 3 and ev:  # усе ще мало — повторюємо найкращі слова на сильних долях
