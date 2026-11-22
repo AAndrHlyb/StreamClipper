@@ -161,8 +161,8 @@ def render_clip(d, meta, c, o, job, k, lay=None, out_name=None, hook=None, zoom=
     wk = d / "out" / "_w"; wk.mkdir(parents=True, exist_ok=True)
     if FONT.exists() and not (wk / FONT.name).exists(): shutil.copy(FONT, wk / FONT.name)
     nick = ""
-    if o.get("watermark") and meta.get("uploader"):
-        nick = {"twitch": "twitch.tv/", "kick": "kick.com/"}.get(meta.get("platform"), "") + meta["uploader"]
+    if o.get("watermark") and (o.get("nick") or meta.get("uploader")):
+        nick = ("@" + o["nick"].strip().lstrip("@")) if o.get("nick") else {"twitch": "twitch.tv/", "kick": "kick.com/"}.get(meta.get("platform"), "") + meta["uploader"]
     (wk / f"s{k}.ass").write_text(ass(sub_words, title, total, lay, o, nick), encoding="utf-8")
     fps = min(60, max(24, round(src_fps(src)))) if not meta.get("_fps") else meta["_fps"]
     # --- граф

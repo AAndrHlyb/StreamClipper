@@ -60,7 +60,7 @@ class Job:
 DEFAULTS = {"mode": "auto", "min_len": 60, "max_len": 90, "max_clips": 40, "min_score": 2.0, "layout": "blur", "cam": None,
             "subs": True, "model": None, "lang": None, "live_minutes": 0, "skip_start": 180, "seq_limit": 0,
             "speech_filter": True, "review": False, "censor": False, "censor_mode": "beep", "sub_style": {},
-            "hook": False, "zoom": False, "watermark": False, "cover": False, "denoise": False, "compile": False, "compile_min": 8, "teaser_sec": 30, "music": None, "music_start": 0, "edit_sec": 15, "edit_textmode": "lyrics", "edit_text": "", "edit_grade": "warm", "edit_behind": True, "edit_mute": False,
+            "hook": False, "zoom": False, "watermark": False, "cover": False, "denoise": False, "compile": False, "compile_min": 8, "teaser_sec": 30, "music": None, "music_start": 0, "edit_sec": 15, "edit_textmode": "lyrics", "edit_text": "", "edit_grade": "warm", "edit_behind": True, "edit_mute": False, "nick": "", "edit_delogo": True,
             "vclips": False, "keywords": [], "history": None, "gpu": None, "live_every": 8}
 
 
@@ -264,7 +264,8 @@ def reedit(d, job):
 
 
 def _download(job, d, meta, url, full, a, b, p0, p1):
-    fmt = "bv*[height<=1080]+ba/b[height<=1080]/b" if full else "Audio_Only/bestaudio/worst"
+    hmax = 2160 if (job.opts or {}).get("mode") == "edit" else 1080  # для едіту кроп 9:16 — потрібно більше пікселів
+    fmt = f"bv*[height<={hmax}]+ba/b[height<={hmax}]/b" if full else "Audio_Only/bestaudio/worst"
     job.step("download_video" if full else "download_audio", p0)
 
     def on(line):

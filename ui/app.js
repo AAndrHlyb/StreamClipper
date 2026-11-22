@@ -1,5 +1,5 @@
 // StreamClipper UI. Стан: P (перевірене посилання), CH (канал), cur (поточна задача).
-const $=id=>document.getElementById(id);
+const UIV='2.3.1';const $=id=>document.getElementById(id);
 let THFAIL=false,LANG='uk',SET={},P=null,CH=null,cur={},img=null,cam=[0,0,.25,.25],poll=null,WEDIT=false,WLIST=[],NOTIFIED={};
 const st={etm:'lyrics',egrade:'warm',sspeed:'auto',mode:'best',layout:'blur',per:'30',typ:'archive',sp:'classic',ss:'m',spos:'auto',sw:'3',slang:'uk'};
 const t=(k,...a)=>{let s=(I18N[LANG]||I18N.uk)[k];if(s===undefined)s=I18N.uk[k]??k;return s.replace(/\{(\d)\}/g,(_,i)=>a[i]??'')};
@@ -41,7 +41,8 @@ $('url').addEventListener('keydown',e=>{if(e.key==='Enter')doProbe()});
 
 async function health(){try{const h=await api('/api/health');SET=h.settings;LANG=SET.lang||'uk';st.slang=LANG;mark('slang','slang');applyI18n();
   $('hc').textContent=t(h.ffmpeg?'st_ok':'st_noff');$('hd').className='dot '+(h.ffmpeg?'ok':'bad');if(h.ffmpeg_err)$('perr').textContent=h.ffmpeg_err;
-  $('model').value=SET.model||'small';$('x_gpu').checked=!!SET.gpu;$('x_hist').checked=!!SET.history;$('sver').textContent='v'+h.version;xcount()}
+  $('model').value=SET.model||'small';$('x_gpu').checked=!!SET.gpu;$('x_hist').checked=!!SET.history;$('sver').textContent='v'+h.version;$('enick').value=$('enick').value||SET.nick||'';
+  if(h.version&&h.version!==UIV){$('updb').classList.remove('hide');$('updb').lastElementChild.textContent=t('restart_need');$('updb').onclick=null}xcount()}
   catch(e){$('hc').textContent=t('st_down');$('hd').className='dot bad'}}
 
 // ---------------- посилання / канал / превʼю
@@ -94,7 +95,7 @@ function opts(){const kw=$('x_kw').checked?$('kw').value:'';
   censor:$('x_censor').checked,censor_mode:$('x_censor_mode').value,hook:$('x_hook').checked,zoom:$('x_zoom').checked,watermark:$('x_wm').checked,
   cover:$('x_cover').checked,denoise:$('x_denoise').checked,compile_min:st.mode==='compile'?Math.max(1,+$('cnt').value||8):8,teaser_sec:st.mode==='teaser'?Math.min(90,Math.max(10,+$('cnt').value||30)):30,
   edit_sec:st.mode==='edit'?Math.min(60,Math.max(5,+$('cnt').value||15)):15,music:EM?EM.path:null,music_start:+$('emstart').value||0,edit_textmode:st.etm,edit_text:$('etext').value,
-  edit_grade:st.egrade,edit_behind:$('ebehind').checked,edit_mute:$('emute').checked,vclips:$('x_vclips').checked,history:$('x_hist').checked,
+  edit_grade:st.egrade,nick:$('enick').value.trim(),edit_behind:$('ebehind').checked,edit_delogo:$('edelogo').checked,edit_mute:$('emute').checked,vclips:$('x_vclips').checked,history:$('x_hist').checked,
   gpu:$('x_gpu').checked,keywords:kw,sub_style:{preset:st.sp,size:st.ss,pos:st.spos,words:+st.sw,caps:$('scaps').checked,font:$('sfont').value}}}
 function plan(){if(!P)return;const i=P.info,o=opts(),live=['live','live_vod'].includes(i.kind);
   const dur=live?(o.live_minutes||120)*60+(i.duration||0):(i.duration||0),avg=(o.min_len+o.max_len)/2;let n,L=[],mb=0,min=0;const sp={base:.06,small:.13,medium:.35}[o.model]||.13;
@@ -216,8 +217,10 @@ function renderRes(rs,dir,total){$('rc').textContent='· '+rs.length;timeline(rs
     el.querySelector('[data-up]').onclick=()=>rate(dir,r,true,rs,total);el.querySelector('[data-down]').onclick=()=>rate(dir,r,false,rs,total);
     b.onclick=async()=>{b.disabled=true;b.textContent=t('rebuild');try{const q=await api('/api/rerender',{dir,n:r.n,title:inp.value});
       const tm=setInterval(async()=>{const j=await api('/api/job/'+q.job);if(j.state!=='running'){clearInterval(tm);if(j.err)alert(t(j.err));else{Object.assign(r,j.results[0]);renderRes(rs,dir,total)}}},1500)}catch(e){alert(e.message);b.disabled=false}}})}
+$('enick').addEventListener('change',()=>saveSet({nick:$('enick').value.trim()}).catch(()=>{}));
 $('emusic').addEventListener('change',async e=>{const f=e.target.files[0];if(!f)return;$('emname').textContent=t('uploading');
-  try{const r=await fetch('/api/upload?name='+encodeURIComponent(f.name),{method:'POST',body:f});const j=await r.json();if(!r.ok||j.error)throw new Error(t(j.error)||j.error);
+  try{const r=await fetch('/api/upload?name='+encodeURIComponent(f.name),{method:'POST',body:f});
+    if(r.status===404)throw new Error(t('restart_need'));const j=await r.json().catch(()=>({error:'bad_audio'}));if(!r.ok||j.error)throw new Error(t(j.error)||j.error);
     EM=j;$('emname').textContent=`${j.name} · ${hms(j.dur)}`;$('emstart').max=Math.max(0,Math.floor(j.dur-5));plan()}catch(err){$('emname').textContent=err.message;EM=null}});
 async function reEdit(){if(!cur.dir)return;const r=await api('/api/reedit',{dir:cur.dir});$('s3').classList.remove('hide');$('jerr').textContent='';track(r.job)}
 function showComp(p,d,vert,kind){$('s4').classList.remove('hide');$('compbox').classList.remove('hide');$('compbox').classList.toggle('vert',!!vert);$('compn').textContent=t(kind==='edit'?'m_edit':vert?'m_teaser':'m_compile');$('compmore').classList.toggle('hide',kind!=='edit');if($('compv').dataset.p!==p){$('compv').dataset.p=p;$('compv').src=fileUrl(p)}
@@ -284,4 +287,4 @@ async function updGo(){$('supd').textContent=t('s_upd_wait');try{await api('/api
 async function watchJobs(){try{const L=await api('/api/jobs');for(const j of L){if(j.live&&!NOTIFIED[j.id]){NOTIFIED[j.id]=1;notifyB('StreamClipper',(j.uploader||'')+' '+t('n_live'))}}}catch(e){}}
 setInterval(watchJobs,30000);
 document.fonts.load('800 40px Montserrat').then(draw);
-health().then(()=>{tab((location.hash||'#cut').slice(1)||'cut');setTimeout(async()=>{try{const u=await api('/api/update');$('updb').classList.toggle('hide',!u.newer)}catch(e){}},2000)});
+health().then(()=>{tab((location.hash||'#cut').slice(1)||'cut');setTimeout(async()=>{try{const u=await api('/api/update');if(!$('updb').onclick&&!$('updb').classList.contains('hide'))return;$('updb').classList.toggle('hide',!u.newer)}catch(e){}},2000)});

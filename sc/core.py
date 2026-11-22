@@ -137,7 +137,7 @@ SETTINGS_F = OUT_ROOT / "settings.json"
 _SLOCK = threading.Lock()
 DEFAULT_SETTINGS = {
     "lang": "uk", "model": None, "gpu": False, "quiet": False, "disk_limit_gb": None, "lan": False,
-    "token": None, "history": True, "speed": "auto", "profiles": {}, "watch": [], "learn": {}, "auto_done": False,
+    "token": None, "history": True, "speed": "auto", "nick": "", "profiles": {}, "watch": [], "learn": {}, "auto_done": False,
 }
 KNOWN_CAMS = {"evelone2004": [0, 0.58, 0.222, 0.222], "buster": [0, 0, 0.26, 0.26]}
 

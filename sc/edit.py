@@ -10,7 +10,8 @@ import numpy as np
 
 from .core import APP_DIR, ffmpeg, run_proc, perf
 from . import analysis as A
-from .render import encoder_args, segment, _cv2
+from .render import segment, _cv2
+from .core import src_fps
 
 W, H, FPS = 1080, 1920, 30
 FONT_BIG = APP_DIR / "fonts" / "Anton-Regular.ttf"
@@ -169,6 +170,56 @@ def _sample(src, t, pre, job):
 
 
 _CASC = {}
+_SRCH = {}
+
+
+def _src_wh(src):
+    """Розмір відео джерела (кеш)."""
+    if src not in _SRCH:
+        import re as _re
+        r = subprocess.run([ffmpeg(), "-hide_banner", "-i", str(src)], capture_output=True, text=True, errors="replace").stderr
+        m = _re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", r)
+        _SRCH[src] = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+    return _SRCH[src]
+
+
+def _src_h(src): return _src_wh(src)[1]
+
+
+def find_logos(src, dur, job=None):
+    """Статичні написи/логотипи джерела (водяні знаки): краї, що стоять на місці в усіх кадрах. -> [(x,y,w,h) частки]."""
+    cv2 = _cv2(); edges = []
+    for k in range(14):
+        t = dur * (0.04 + 0.92 * k / 13)
+        out = subprocess.run([ffmpeg(), "-v", "error", "-ss", f"{t:.2f}", "-i", str(src), "-frames:v", "1", "-vf", "scale=640:-2",
+                              "-f", "image2pipe", "-vcodec", "png", "-"], capture_output=True).stdout
+        img = cv2.imdecode(np.frombuffer(out, np.uint8), cv2.IMREAD_GRAYSCALE) if out else None
+        if img is not None: edges.append(cv2.Canny(img, 40, 120) > 0)
+    if len(edges) < 6: return []
+    h, w = edges[0].shape
+    edges = [e for e in edges if e.shape == (h, w)]
+    st = (np.mean(edges, 0) >= 0.5).astype(np.uint8) * 255  # частина кадрів — спалахи/плашки без знаку
+    st[:3, :] = st[-3:, :] = 0; st[:, :3] = st[:, -3:] = 0
+    st = cv2.dilate(st, np.ones((9, 15), np.uint8))
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(st)
+    boxes = []
+    for i in range(1, n):
+        x, y, bw, bh, area = stats[i]
+        if area < 60 or bw * bh > 0.03 * w * h or bh > 0.15 * h or bw > 0.6 * w: continue
+        boxes.append((max(0.0, (x - 4) / w), max(0.0, (y - 4) / h), min(1.0, (bw + 8) / w), min(1.0, (bh + 8) / h)))
+    return boxes[:4]
+
+
+def delogo_vf(src, boxes):
+    """ffmpeg delogo для знайдених боксів у пікселях джерела."""
+    sw, shh = _src_wh(src)
+    if not boxes or not sw: return ""
+    out = []
+    for x, y, w, h in boxes:
+        X, Y = max(1, int(x * sw)), max(1, int(y * shh)); Wd, Hd = int(w * sw), int(h * shh)
+        Wd, Hd = min(Wd, sw - X - 2), min(Hd, shh - Y - 2)
+        if Wd > 4 and Hd > 4: out.append(f"delogo=x={X}:y={Y}:w={Wd}:h={Hd}")
+    return ",".join(out)
 
 
 def _faces(img):
@@ -178,7 +229,7 @@ def _faces(img):
     return list(_CASC["f"].detectMultiScale(g, 1.1, 5, minSize=(int(img.shape[1] * 0.06),) * 2))
 
 
-def render_shot(src, t, sh, o, job, out, cam=None):
+def render_shot(src, t, sh, o, job, out, cam=None, logos=None):
     """Один кадр плану → 1080×1920, точна кількість кадрів. t — час початку у файлі src."""
     nfr = max(2, int(round((sh["b"] - sh["a"]) * FPS)))
     pre = f"crop=iw*{cam[2]:.4f}:ih*{cam[3]:.4f}:iw*{cam[0]:.4f}:ih*{cam[1]:.4f}" if cam else ""
@@ -191,12 +242,21 @@ def render_shot(src, t, sh, o, job, out, cam=None):
             ow = min(1.0, h * 9 / 16 / w)
             if ow < 1: fx = min(1, max(0, ((x + fw / 2) / w - ow / 2) / (1 - ow)))
     grade = GRADES.get(o.get("edit_grade") or "warm", GRADES["warm"])
-    vf = ",".join(x for x in [pre, f"crop=w='min(iw,ih*9/16)':h='min(ih,iw*16/9)':x='(iw-ow)*{fx:.3f}':y='(ih-oh)*0.45'",
-                              f"scale={W}:{H}:flags=lanczos", "setsar=1", f"setpts=(PTS-STARTPTS)/{sh['speed']}",
-                              f"minterpolate=fps={FPS}:mi_mode=blend" if sh["speed"] < 1 else f"fps={FPS}",
-                              grade, "noise=alls=6:allf=t", "vignette=PI/5", "format=yuv420p"] if x)
+    sfps = src_fps(src) or 30
+    up = 1.0
+    if img is not None:  # наскільки збільшуємо: кроп 9:16 зі зменшеного кадру → оцінка у пікселях джерела
+        sh0 = _src_h(src)
+        if sh0: up = H / sh0 / (cam[3] if cam else 1.0)
+    vf = ",".join(x for x in [
+        delogo_vf(src, logos), pre, f"crop=w='min(iw,ih*9/16)':h='min(ih,iw*16/9)':x='(iw-ow)*{fx:.3f}':y='(ih-oh)*0.45'",
+        "hqdn3d=1.2:1.2:2.5:2.5" if up > 1.3 else "",  # прибрати шум/блоки перед збільшенням
+        f"scale={W}:{H}:flags=lanczos+accurate_rnd+full_chroma_int", "setsar=1",
+        f"cas={min(0.85, 0.35 + 0.25 * max(0.0, up - 1)):.2f}" if up > 1.05 else "cas=0.3",  # адаптивне різкість
+        f"setpts=(PTS-STARTPTS)/{sh['speed']}",
+        f"minterpolate=fps={FPS}:mi_mode=blend" if (sh["speed"] < 1 and sfps < 45) else f"fps={FPS}",
+        grade, "noise=alls=2:allf=t", "vignette=PI/5", "format=yuv420p"] if x)
     run_proc([ffmpeg(), "-y", "-v", "error", "-ss", f"{max(0, t):.3f}", "-t", f"{(sh['b'] - sh['a']) * sh['speed'] + 0.5:.3f}", "-i", str(src),
-              "-vf", vf, "-frames:v", str(nfr), "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "12", str(out)], job)
+              "-vf", vf, "-frames:v", str(nfr), "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "8", str(out)], job)
     return {"file": str(out), "n": nfr, "face": face}
 
 
@@ -388,6 +448,13 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
             srcs[k] = (src, off, s0)
         return srcs[k]
     cam = o.get("cam") if o.get("layout") == "cam" else None
+    logos = []
+    if o.get("edit_delogo", True) and meta.get("video"):
+        try:
+            logos = find_logos(meta["video"], meta.get("duration") or 60)
+            if logos: job.log("edit_delogo", len(logos))
+        except Exception:
+            logos = []
     job.step("edit_shots", 64)
     from .pipeline import _pmap
     done = [0]
@@ -395,7 +462,8 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     def one(i):
         sh = shots[i]; src, off, s0 = src_of(sh["k"])
         # для стрімів з вебкою: чергуємо крупний план вебки і гру
-        r = render_shot(src, max(0.0, off + sh["t"] - s0), sh, o, job, wk / f"s{i:03d}.mp4", cam=cam if (cam and i % 3 != 2) else None)
+        r = render_shot(src, max(0.0, off + sh["t"] - s0), sh, o, job, wk / f"s{i:03d}.mp4", cam=cam if (cam and i % 3 != 2) else None,
+                      logos=logos if meta.get("video") else None)
         done[0] += 1; job.pct = 64 + 14 * done[0] / len(shots); job.sub = f"{done[0]}/{len(shots)}"
         return r
     parts = _pmap(one, list(range(len(shots))), max(1, perf()["render"] + 1))
@@ -405,7 +473,8 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     behind_ok = seg is not None and seg.net is not None and any(p["face"] for p in parts)
     ev = style_events(ev, rnd, behind_ok)
     out = d / "out" / name
-    eargs = encoder_args({**o, "gpu": False})[1]  # кодер у пайпі — без ризику GPU-збою посередині
+    eargs = ["-c:v", "libx264", "-preset", "medium", "-crf", "15", "-tune", "film", "-profile:v", "high", "-level", "4.2",
+             "-maxrate", "30M", "-bufsize", "60M", "-pix_fmt", "yuv420p", "-x264-params", "aq-mode=3"]
     nfr_total = sum(p["n"] for p in parts)
     cmd = [ffmpeg(), "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-"]
     if music and not o.get("edit_mute"):
@@ -415,8 +484,9 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     pe = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     hits = m["hits"]
     sb = sorted(zip(m["strength"], m["beats"]), reverse=True); strong = {b for _, b in sb[:max(1, len(sb) // 6)]}
-    nick = meta.get("uploader") if o.get("watermark") else None
-    wm = sprite(nick, 40, FONT_BOLD, (235, 235, 235), stroke=3) if nick else None
+    nick = (o.get("nick") or "").strip().lstrip("@")
+    wm = sprite(nick, 50, FONT_BOLD, (240, 240, 240), stroke=2, stroke_fill=(30, 30, 30)) if nick else None
+    endc = sprite(nick.upper(), fit_size(nick.upper(), FONT_BIG, W * 0.7, hi=220), FONT_BIG, (245, 245, 245)) if nick else None
     rc, fi, prev_last = {}, 0, None
     try:
         for i, (sh, pr) in enumerate(zip(shots, parts)):
@@ -434,13 +504,13 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 # наїзд на ударі + повільний наїзд у кадрі
                 lh = max([h for h in hits if h <= t + 1e-3], default=-9)
                 z = 1 + 0.13 * math.exp(-(t - lh) / 0.11) if t - lh < 0.6 else 1.0
-                z *= 1 + 0.035 * j / max(1, pr["n"])
+                z *= 1 + 0.018 * j / max(1, pr["n"])
                 sx = sy = 0.0
                 if t - lh < 0.18 and lh in strong:
                     amp = 22 * math.exp(-(t - lh) / 0.06); sx, sy = rnd.uniform(-amp, amp), rnd.uniform(-amp, amp)
-                if z > 1.001 or sx or sy:
+                if z > 1.002 or sx or sy:
                     M = cv2.getRotationMatrix2D((W / 2, H * 0.45), 0, z); M[0, 2] += sx; M[1, 2] += sy
-                    fr = cv2.warpAffine(fr, M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+                    fr = cv2.warpAffine(fr, M, (W, H), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT)
                 # змаз-перехід (whip)
                 if (sh["whip"] and j < 3) or (nxt and nxt["whip"] and j >= pr["n"] - 3):
                     fr = cv2.blur(fr, (61, 1))
@@ -452,12 +522,17 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 head = head_of(mask) if mask is not None else None
                 for e in ev:
                     if e["t0"] <= t < e["t1"]: draw_text(fr, e, t, mask if head else None, head, rc)
-                if wm is not None: blend(fr, wm, W / 2, H * 0.80, None, False, 0.85)
+                if wm is not None and t < nfr_total / FPS - 0.9: blend(fr, wm, W / 2, H * 0.80, None, False, 0.92)
                 # спалах на склейці
                 if sh["flash"] and j < 3:
                     a = (0.75, 0.4, 0.15)[j]; fr = cv2.addWeighted(fr, 1 - a, np.full_like(fr, 255), a, 0)
-                if t > nfr_total / FPS - 0.4:
-                    fr = (fr * max(0.0, (nfr_total / FPS - t) / 0.4)).astype(np.uint8)
+                T = nfr_total / FPS
+                if endc is not None and t >= T - 0.9:  # фінальна плашка з ніком, як у референсі
+                    q = (t - (T - 0.9)) / 0.9
+                    fr = (fr * max(0.0, 1 - q * 2.2)).astype(np.uint8)
+                    blend(fr, warp(endc, 1.12 - 0.12 * ease(q * 2)), W / 2, H / 2, None, False, min(1.0, q * 4))
+                elif t > T - 0.4:
+                    fr = (fr * max(0.0, (T - t) / 0.4)).astype(np.uint8)
                 pe.stdin.write(fr.tobytes()); fi += 1; prev_last = fr
                 if fi % 15 == 0: job.pct = 78 + 20 * fi / nfr_total; job.sub = f"{fi}/{nfr_total}"
             pd.stdout.close(); pd.wait()
