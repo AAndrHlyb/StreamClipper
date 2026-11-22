@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .core import FONT, YTDLP, ffmpeg, run_proc, capture, settings, gpu_encoder, slug, hms, src_fps
+from .core import perf, FONT, YTDLP, ffmpeg, run_proc, capture, settings, gpu_encoder, slug, hms, src_fps
 from .analysis import PROFANITY, pcm
 
 # ------------------------------------------------------------------ стили субтитров
@@ -125,7 +125,7 @@ def segment(d, meta, s, e, tag, job, pad=4):
     if meta.get("video"): return meta["video"], s - meta.get("video_offset", 0.0)
     raw = Path(d) / "raw" / f"{tag}.mp4"; raw.parent.mkdir(exist_ok=True); a0 = max(0, s - pad)
     if not raw.exists():
-        run_proc([*YTDLP, "-q", "--no-progress", "--no-warnings", "-f", "bv*[height<=1080]+ba/b[height<=1080]/best", "-N", "8",
+        run_proc([*YTDLP, "-q", "--no-progress", "--no-warnings", "-f", "bv*[height<=1080]+ba/b[height<=1080]/best", "-N", str(perf()["net"]),
                   "--ffmpeg-location", ffmpeg(), "--download-sections", f"*{a0:.0f}-{e + pad:.0f}",
                   "--merge-output-format", "mp4", "-o", str(raw), meta["url"]], job)
     ap, aoff = audio_for(meta, s)
@@ -143,13 +143,13 @@ def censor_af(ws, mode="beep"):
     return duck, beep
 
 
-def render_clip(d, meta, c, o, job, k, lay=None, out_name=None, hook=None, zoom=None):
+def render_clip(d, meta, c, o, job, k, lay=None, out_name=None, hook=None, zoom=None, seg=None):
     """Собирает один клип. c: start/end (абс.), words, title, peak."""
     d = Path(d); lay = lay or o["layout"]
     hook = o.get("hook") if hook is None else hook
     zoom = o.get("zoom") if zoom is None else zoom
     s, e = c["start"], c["end"]; dur = e - s; title = c.get("title") or ""
-    src, off = segment(d, meta, s, e, f"c{k}_{int(s)}", job)
+    src, off = seg or segment(d, meta, s, e, f"c{k}_{int(s)}", job)
     W, H = RES[lay]
     words = [{"s": w["s"] - s, "e": w["e"] - s, "w": w["w"]} for w in c.get("words", []) if 0 <= w["s"] - s < dur] if o.get("subs", True) else []
     pk = min(max(0.5, (c.get("peak") or s + dur * 0.4) - s), dur - 0.5)

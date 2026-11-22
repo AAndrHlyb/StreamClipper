@@ -2,11 +2,27 @@
 import json, math, re, shutil, subprocess, threading, time
 from pathlib import Path
 
-from .core import (OUT_ROOT, YTDLP, Cancelled, capture, dur_of, enforce_disk_limit, ffmpeg, hms, jload, jsave, notify,
+from .core import (perf, OUT_ROOT, YTDLP, Cancelled, capture, dur_of, enforce_disk_limit, ffmpeg, hms, jload, jsave, notify,
                    popen_kw, run_proc, settings, slug, source_files, dir_size)
 from . import sources as S
-from .analysis import bounds, find_peaks, loudness, rerank, sequential, words_of
-from .render import compilation, render_clip
+from .analysis import bounds, find_peaks, loudness, loudness_par, rerank, sequential, words_of
+from .render import compilation, render_clip, segment
+from concurrent.futures import ThreadPoolExecutor
+
+_POOL = ThreadPoolExecutor(8)  # фонові завдання (чат паралельно із завантаженням)
+
+
+def _pmap(fn, items, workers):
+    """map із заданою кількістю потоків; порядок результатів зберігається, помилка/скасування — одразу далі."""
+    items = list(items)
+    if workers <= 1 or len(items) <= 1: return [fn(x) for x in items]
+    with ThreadPoolExecutor(workers) as ex:
+        futs = [ex.submit(fn, x) for x in items]
+        try:
+            return [f.result() for f in futs]
+        except BaseException:
+            for f in futs: f.cancel()
+            raise
 
 HISTORY = OUT_ROOT / "history.json"
 
@@ -122,15 +138,23 @@ def _run(job):
     # 1) источник
     if info["platform"] == "file":
         meta.update(video=info["url"], audio=info["url"], duration=info["duration"])
-    else:
+    chat_f = None
+    if info["platform"] != "file":
         full = info["platform"] not in ("twitch",) or mode == "seq"
+        if mode == "best" and info.get("duration"):
+            # чат качається одночасно зі звуком/відео — вони не залежать одне від одного
+            chat_f = _POOL.submit(_chat, job, d, meta, info, 0, info["duration"], o, True)
         _download(job, d, meta, info["url"], full, 0, None, 2, 30)
         meta["duration"] = info.get("duration") or dur_of(meta["audio"])
     jsave(d / "meta.json", meta)
     n = meta["duration"]
     # 2) выбор
     if mode == "best":
-        chat = _chat(job, d, meta, info, 0, n, o)
+        if chat_f:
+            if not chat_f.done(): job.step("download_chat", job.pct)
+            chat = chat_f.result()
+        else:
+            chat = _chat(job, d, meta, info, 0, n, o)
         clips = _select(job, d, meta, o, 0, n, chat, used=history_used(meta["uploader"], meta["vid"]) if o["history"] else [])
     else:
         clips = _sequential(job, meta, o, n)
@@ -148,7 +172,7 @@ def _download(job, d, meta, url, full, a, b, p0, p1):
             job.pct = p0 + (p1 - p0) * float(m.group(1)) / 100; job.sub = line.split("]", 1)[-1].strip()[:60]
     tag = "video" if full else "audio"
     if a or b: tag += f"_{int(a)}"
-    cmd = [*YTDLP, "--newline", "--no-warnings", "--no-part", "-N", "8", "-f", fmt, "--ffmpeg-location", ffmpeg(),
+    cmd = [*YTDLP, "--newline", "--no-warnings", "--no-part", "-N", str(perf()["net"]), "-f", fmt, "--ffmpeg-location", ffmpeg(),
            "--merge-output-format", "mp4", "-o", str(d / f"{tag}.%(ext)s")]
     if a or b: cmd += ["--download-sections", f"*{int(a)}-{int(b) if b else 'inf'}"]
     run_proc(cmd + [url], job, on)
@@ -163,13 +187,13 @@ def _download(job, d, meta, url, full, a, b, p0, p1):
     return path
 
 
-def _chat(job, d, meta, info, a, b, o):
+def _chat(job, d, meta, info, a, b, o, background=False):
     rows = []
     if info["platform"] == "twitch" and info.get("video_id"):
-        job.step("download_chat", job.pct)
+        if not background: job.step("download_chat", job.pct)
         rows = S.twitch_chat(info["video_id"], a, b, job)
     elif info["platform"] == "youtube" and info.get("has_chat") and a == 0:
-        job.step("download_chat", job.pct)
+        if not background: job.step("download_chat", job.pct)
         rows = S.yt_live_chat(info["url"], d, job)
     if rows:
         with open(d / "chat.jsonl", "a", encoding="utf-8") as f:
@@ -181,22 +205,29 @@ def _select(job, d, meta, o, a, b, chat, used=(), audio=None, audio_off=0.0, p0=
     """Анализ окна [a,b] таймлайна; возвращает отобранные клипы."""
     if audio is None: audio, audio_off = meta["audio"], meta.get("audio_offset", 0.0)
     job.step("analyze", p0)
-    loud = loudness(audio, int(math.ceil(b - a)) + 1, job, start=a - audio_off, dur=b - a)
+    pf = perf()
+    loud = loudness_par(audio, int(math.ceil(b - a)) + 1, job, start=a - audio_off, dur=b - a, parts=pf["loud"])
     vcl = []
     if o.get("vclips") and meta["platform"] == "twitch" and meta["info"].get("video_id"):
         vcl = S.viewer_clips(meta["uploader"], meta["info"]["video_id"])
         job.log("vclips", len(vcl))
     cands, keep = find_peaks(job, loud, chat, o, offset=a, vclips=vcl, used=used, keywords=o.get("keywords") or [])
     job.log("cands", len(cands), keep)
-    out = []
-    for i, c in enumerate(cands, 1):
-        job.check(); job.pct = p0 + (p1 - p0) * i / max(1, len(cands)); job.stage, job.args = "speech", [str(i), str(len(cands))]
+    done = [0]; lock = threading.Lock()
+
+    def one(c):
+        job.check()
         p = c["peak"]; w0 = max(a, p - 45)
         ws = words_of(audio, w0, min(b, p + o["max_len"]) - w0, o, job, src_offset=audio_off)
+        with lock:
+            done[0] += 1; job.pct = p0 + (p1 - p0) * done[0] / max(1, len(cands)); job.stage, job.args = "speech", [str(done[0]), str(len(cands))]
         s, e = bounds(p, ws, a, b, o["min_len"], o["max_len"])
-        if e - s < o["min_len"] * 0.6: continue  # обрізаний край запису (кінець відео / ще не записаний лайв)
+        if e - s < o["min_len"] * 0.6: return None  # обрізаний край запису (кінець відео / ще не записаний лайв)
         cl = {"start": s, "end": e, "words": [w for w in ws if s - 0.2 <= w["s"] < e], "_ws": ws, **c}
-        cl["final"] = rerank(cl, o, meta["uploader"]); out.append(cl)
+        cl["final"] = rerank(cl, o, meta["uploader"]); return cl
+    if cands and not o.get("_lang") and not o.get("lang"): first = [one(cands[0])]; rest = cands[1:]  # перший визначає мову
+    else: first, rest = [], cands
+    out = [c for c in first + _pmap(one, rest, pf["asr"]) if c]
     out = sorted(sorted(out, key=lambda c: -c["final"])[:keep], key=lambda c: c["start"])
     job.extra["review_src"] = {"path": audio, "off": audio_off}
     return out
@@ -205,11 +236,17 @@ def _select(job, d, meta, o, a, b, chat, used=(), audio=None, audio_off=0.0, p0=
 def _sequential(job, meta, o, n):
     lim = o["seq_limit"] or 10 ** 6
     end = min(n, o["max_len"] * lim * 1.2) if o["seq_limit"] else n
-    ws, t = [], 0.0
+    ws = []
     if o["subs"]:
-        while t < end:
-            job.check(); job.pct = 35 + 30 * t / max(1, end); job.stage, job.args = "speech_seq", [hms(t), hms(end)]
-            ws += words_of(meta["audio"], t, min(300, end - t), o, job); t += 300
+        starts = list(range(0, int(math.ceil(end)), 300)); done = [0]; lock = threading.Lock()
+
+        def one(t):
+            job.check(); r = words_of(meta["audio"], t, min(300, end - t), o, job)
+            with lock:
+                done[0] += 1; job.pct = 35 + 30 * done[0] / max(1, len(starts)); job.stage, job.args = "speech_seq", [hms(min(end, done[0] * 300)), hms(end)]
+            return r
+        if starts and not o.get("_lang") and not o.get("lang"): ws += one(starts.pop(0))
+        for r in _pmap(one, starts, perf()["asr"]): ws += r
     parts = sequential(ws, 0, end, o["min_len"], o["max_len"])[:lim]
     job.log("parts", len(parts)); job.extra["review_src"] = {"path": meta["audio"], "off": 0.0}
     return [{"start": s, "end": e, "words": [w for w in ws if s - 0.2 <= w["s"] < e], "score": 0, "final": 0, "chat": "", "f": {}} for s, e in parts]
@@ -244,12 +281,28 @@ def _render_all(job, d, meta, o, clips, start_k=None, p0=66, p1=98):
     for i, c in enumerate(clips): c["k"] = k0 + i
     jsave(d / "clips.json", prev + [{k: v for k, v in c.items() if k != "_ws"} for c in clips])
     tag = re.sub(r"\W", "", meta["uploader"]).lower()
-    done = []
-    for i, c in enumerate(clips, 1):
-        job.check(); job.pct = p0 + (p1 - p0) * (i - 1) / max(1, len(clips)); job.stage, job.args = "render", [str(i), str(len(clips))]
-        r = render_clip(d, meta, c, o, job, c["k"]); job.results.append(r); done.append(r)
-        _captions(d, meta, job.results, tag)
-        jsave(d / "results.json", job.results)
+    done = []; pf = perf(); lock = threading.Lock(); cnt = [0]
+    # відео для наступних кліпів качається наперед, поки збираються попередні (мережа і процесор працюють одночасно)
+    need_dl = not meta.get("video")
+    pre = ThreadPoolExecutor(max(1, pf["prefetch"])) if need_dl else None
+    segs = {c["k"]: pre.submit(segment, d, meta, c["start"], c["end"], f"c{c['k']}_{int(c['start'])}", job) for c in clips} if pre else {}
+
+    def one(c):
+        job.check()
+        seg = segs[c["k"]].result() if segs else None
+        r = render_clip(d, meta, c, o, job, c["k"], seg=seg)
+        with lock:
+            cnt[0] += 1; job.pct = p0 + (p1 - p0) * cnt[0] / max(1, len(clips)); job.stage, job.args = "render", [str(min(len(clips), cnt[0] + 1)), str(len(clips))]
+            job.results.append(r); job.results.sort(key=lambda x: x["n"]); done.append(r)
+            _captions(d, meta, job.results, tag); jsave(d / "results.json", job.results)
+        return r
+    job.stage, job.args = "render", ["1", str(len(clips))]
+    try:
+        _pmap(one, clips, pf["render"])
+    finally:
+        if pre:
+            for f in segs.values(): f.cancel()
+            pre.shutdown(wait=False)
     if o["history"]: history_add(meta["uploader"], meta["vid"], done)
     if o.get("compile") and len(job.results) >= 3 and not job.live:
         job.step("compile", 98)

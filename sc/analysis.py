@@ -4,7 +4,7 @@ from collections import Counter
 
 import numpy as np
 
-from .core import ffmpeg, run_proc, capture, hms, popen_kw, Cancelled, settings, save_settings
+from .core import perf, ffmpeg, run_proc, capture, hms, popen_kw, Cancelled, settings, save_settings
 
 # ------------------------------------------------------------------ словари по языкам
 NOISE = re.compile(r"(?i)^\s*(!.*|[\d\s.,%+\-xх]+|да|нет|ні|так|ку+|q|hi|hello|привет\w*|привіт\w*|прив|здаров\w*|бб+|bb+|пока|бувай|gn|f|ф|[1-5])\s*$")
@@ -49,6 +49,26 @@ def loudness(audio, n, job=None, start=0.0, dur=None):
     cmd += ["-i", audio]
     if dur: cmd += ["-t", f"{dur:.2f}"]
     run_proc(cmd + ["-vn", "-af", "ebur128", "-f", "null", "-"], job, on, check=False)
+    return x
+
+
+def loudness_par(audio, n, job=None, start=0.0, dur=None, parts=1):
+    """Те саме, що loudness, але довгий запис ділиться на шматки, які рахуються одночасно."""
+    dur = dur or n
+    if parts <= 1 or dur < 1800: return loudness(audio, n, job, start, dur)
+    from concurrent.futures import ThreadPoolExecutor
+    step = math.ceil(dur / parts); warm = 5
+    def one(i):
+        a = i * step; b = min(dur, a + step)
+        a0 = max(0, a - warm)  # кілька секунд розгону ebur128, їх відкидаємо
+        y = loudness(audio, int(math.ceil(b - a0)) + 1, job, start + a0, b - a0)
+        return a, a0, b, y
+    x = np.full(n, -70.0)
+    with ThreadPoolExecutor(parts) as ex:
+        for a, a0, b, y in ex.map(one, range(parts)):
+            lo, hi = int(a), min(n, int(math.ceil(b)) + 1)
+            seg = y[lo - int(a0): lo - int(a0) + (hi - lo)]
+            x[lo:lo + len(seg)] = np.maximum(x[lo:lo + len(seg)], seg)
     return x
 
 
@@ -141,19 +161,23 @@ def find_peaks(job, loud, chat, o, offset=0.0, vclips=(), used=(), keywords=()):
 _M = {}
 
 
+_MLOCK = __import__("threading").Lock()
+
+
 def whisper(o, job):
-    name = o["model"]
-    if name not in _M:
-        try: import av  # noqa
-        except Exception:  # Smart App Control может блокировать PyAV — он не нужен
-            for k in [k for k in sys.modules if k == "av" or k.startswith("av.")]: del sys.modules[k]
-            sys.modules["av"] = types.ModuleType("av")
-        job.log("model", name)
-        from faster_whisper import WhisperModel
-        th = os.cpu_count() or 4
-        if settings().get("quiet"): th = max(1, th // 2)
-        _M[name] = WhisperModel(name, device=os.environ.get("SC_DEVICE", "cpu"), compute_type="int8", cpu_threads=th)
-    return _M[name]
+    pf = perf(); key = f'{o["model"]}|{pf["asr"]}|{pf["asr_threads"]}'  # зміна швидкості в налаштуваннях — нова модель
+    with _MLOCK:  # паралельні потоки не повинні вантажити модель двічі
+        if key not in _M:
+            try: import av  # noqa
+            except Exception:  # Smart App Control может блокировать PyAV — он не нужен
+                for k in [k for k in sys.modules if k == "av" or k.startswith("av.")]: del sys.modules[k]
+                sys.modules["av"] = types.ModuleType("av")
+            job.log("model", o["model"])
+            from faster_whisper import WhisperModel
+            for k in [k for k in _M if "|" in k]: del _M[k]  # стара модель звільняє пам'ять
+            _M[key] = WhisperModel(o["model"], device=os.environ.get("SC_DEVICE", "cpu"), compute_type="int8",
+                                   cpu_threads=pf["asr_threads"], num_workers=pf["asr"])
+        return _M[key]
 
 
 def pcm(src, s, d, r=16000):

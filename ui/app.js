@@ -1,7 +1,7 @@
 // StreamClipper UI. Стан: P (перевірене посилання), CH (канал), cur (поточна задача).
 const $=id=>document.getElementById(id);
 let LANG='uk',SET={},P=null,CH=null,cur={},img=null,cam=[0,0,.25,.25],poll=null,WEDIT=false,WLIST=[],NOTIFIED={};
-const st={mode:'best',layout:'blur',per:'30',typ:'archive',sp:'classic',ss:'m',spos:'auto',sw:'3',slang:'uk'};
+const st={sspeed:'auto',mode:'best',layout:'blur',per:'30',typ:'archive',sp:'classic',ss:'m',spos:'auto',sw:'3',slang:'uk'};
 const t=(k,...a)=>{let s=(I18N[LANG]||I18N.uk)[k];if(s===undefined)s=I18N.uk[k]??k;return s.replace(/\{(\d)\}/g,(_,i)=>a[i]??'')};
 const ic=n=>`<svg class="i"><use href="#${n}"/></svg>`;
 async function api(u,b){const r=await fetch(u,b===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(!r.ok||j.error)throw new Error(t(j.error)||j.error||r.status);return j}
@@ -27,6 +27,7 @@ seg('mode','mode',()=>{$('cntl').textContent=t(st.mode==='seq'?'parts':'max_clip
 seg('layout','layout',()=>{draw();plan();hintF()});
 seg('per','per',listVids);seg('typ','typ',listVids);
 ['sp','ss','spos','sw'].forEach(id=>seg(id,id,draw));
+seg('sspeed','sspeed',async()=>{await saveSet({speed:st.sspeed});loadSet()});
 seg('slang','slang',async()=>{LANG=st.slang;applyI18n();await saveSet({lang:LANG})});
 ['mn','mx','cnt','subs','model','livem','scaps','sfont'].forEach(i=>$(i).addEventListener('input',()=>{plan();draw()}));
 document.querySelectorAll('.extras input[type=checkbox]').forEach(x=>x.addEventListener('change',xcount));
@@ -221,6 +222,8 @@ async function loadLib(){try{const L=await api('/api/library');if(!L.length){$('
 async function saveSet(o){SET=await api('/api/settings',o);$('supd').textContent=t('s_saved');return SET}
 async function loadSet(){const h=await api('/api/health');SET=h.settings;const hw=await api('/api/hardware');
   $('smodel').value=SET.model||hw.model;$('sgpu').checked=!!SET.gpu;$('sgpun').textContent=hw.gpu||t('s_gpu_none');$('sgpu').disabled=!hw.gpu;$('gpuname').textContent=hw.gpu||t('s_gpu_none');
+  st.sspeed=SET.speed||'auto';mark('sspeed','sspeed');
+  $('sspeedd').textContent=t('s_speed_d',t('sp_'+hw.speed_auto),hw.perf?t('sp_'+hw.perf.tier):'',hw.perf?t('s_speed_x',hw.perf.loud,hw.perf.asr,hw.perf.render,hw.perf.prefetch):'');
   $('squiet').checked=!!SET.quiet;$('sdisk').value=SET.disk_limit_gb||hw.disk_suggest;$('sdiskd').textContent=t('s_disk_d',hw.disk_suggest);$('shist').checked=!!SET.history;
   $('sphone').checked=!!SET.lan;$('shw').textContent=`${hw.cores} CPU · ${hw.ram} GB RAM · ${hw.gpu||'CPU'} · ${hw.free_gb} GB free`;
   $('snotif').textContent=t(window.Notification&&Notification.permission==='granted'?'s_notif_ok':'s_notif_btn');lan()}

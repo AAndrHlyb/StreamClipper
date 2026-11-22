@@ -137,7 +137,7 @@ SETTINGS_F = OUT_ROOT / "settings.json"
 _SLOCK = threading.Lock()
 DEFAULT_SETTINGS = {
     "lang": "uk", "model": None, "gpu": False, "quiet": False, "disk_limit_gb": None, "lan": False,
-    "token": None, "history": True, "profiles": {}, "watch": [], "learn": {}, "auto_done": False,
+    "token": None, "history": True, "speed": "auto", "profiles": {}, "watch": [], "learn": {}, "auto_done": False,
 }
 KNOWN_CAMS = {"evelone2004": [0, 0.58, 0.222, 0.222], "buster": [0, 0, 0.26, 0.26]}
 
@@ -195,7 +195,35 @@ def hardware():
     model = "medium" if cores >= 12 and ram >= 16 else ("small" if cores >= 6 and ram >= 8 else "base")
     free = shutil.disk_usage(OUT_ROOT if OUT_ROOT.exists() else Path.home()).free / 2**30
     return {"cores": cores, "ram": round(ram, 1), "gpu": gpu_encoder(), "model": model,
-            "free_gb": round(free), "disk_suggest": int(max(10, min(100, free * 0.2))), "cpu": platform.processor() or platform.machine()}
+            "free_gb": round(free), "disk_suggest": int(max(10, min(100, free * 0.2))), "speed_auto": speed_auto(cores, ram), "cpu": platform.processor() or platform.machine()}
+
+
+# ---------------------------------------------------------------- швидкість: скільки робити паралельно
+SPEED = {  # net — потоки завантаження, loud — паралельні шматки аналізу гучності, asr — паралельне розпізнавання,
+           # render — кліпів одночасно, prefetch — скільки відео наперед качати під час рендеру
+    "eco":    {"net": 4,  "loud": 1, "asr": 1, "render": 1, "prefetch": 1},
+    "normal": {"net": 8,  "loud": 2, "asr": 1, "render": 1, "prefetch": 2},
+    "max":    {"net": 12, "loud": 4, "asr": 2, "render": 2, "prefetch": 3},
+}
+TIERS = ["eco", "normal", "max"]
+
+
+def speed_auto(cores=None, ram=None):
+    cores = cores or os.cpu_count() or 4; ram = ram if ram is not None else ram_gb()
+    if cores <= 4 or ram < 7.5: return "eco"
+    if cores >= 10 and ram >= 15: return "max"
+    return "normal"
+
+
+def perf():
+    """План паралельності з урахуванням вибору користувача і тихого режиму."""
+    s = settings(); auto = speed_auto()
+    tier = s.get("speed") if s.get("speed") in SPEED else auto
+    if s.get("quiet"): tier = TIERS[max(0, TIERS.index(tier) - 1)]
+    p = dict(SPEED[tier]); p["tier"] = tier; p["auto"] = auto
+    cores = os.cpu_count() or 4
+    p["asr_threads"] = max(1, (cores // (2 if s.get("quiet") else 1)) // p["asr"])
+    return p
 
 
 def auto_setup():

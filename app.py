@@ -200,7 +200,7 @@ class H(BaseHTTPRequestHandler):
                 except Exception as e: h["ffmpeg_err"] = str(e)
                 return self.send(200, h)
             if u.path == "/api/hardware":
-                return self.send(200, C.hardware())
+                return self.send(200, {**C.hardware(), "perf": C.perf()})
             if u.path.startswith("/api/job/"):
                 j = JOBS.get(u.path.rsplit("/", 1)[-1])
                 return self.send(200, j.view()) if j else self.send(404, {"error": "no job"})
