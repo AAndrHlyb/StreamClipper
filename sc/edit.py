@@ -368,7 +368,7 @@ def blend(frame, spr, cx, cy, mask=None, behind=False, alpha=1.0):
     if behind and mask is not None:
         cv2 = _cv2()
         mm = cv2.resize(mask[fy0 // 2:(fy1 + 1) // 2, fx0 // 2:(fx1 + 1) // 2], (fx1 - fx0, fy1 - fy0), interpolation=cv2.INTER_LINEAR)
-        a = a * (1 - mm[..., None])
+        a = a * (1 - mm[..., None] * float(behind))
     reg = frame[fy0:fy1, fx0:fx1].astype(np.float32)
     frame[fy0:fy1, fx0:fx1] = (reg * (1 - a) + s[..., :3].astype(np.float32) * a).astype(np.uint8)
 
@@ -404,19 +404,48 @@ def scan_video(src, dur, skip=(), job=None):
         sharp = float(cv2.Laplacian(g, cv2.CV_32F).var())
         sat = float(cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[..., 1].mean())
         bright = float(g.mean())
-        feats.append((k, face, sharp, sat, bright)); k += 1
+        dark = float((g < 28).mean())
+        tl, ta = _text_lines(g)
+        sig = cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2HSV), (4, 4), interpolation=cv2.INTER_AREA)[..., [0, 2]].ravel().tolist()
+        feats.append((k, face, sharp, sat, bright, dark, tl, ta, sig)); k += 1
     p.wait(); th.join(timeout=2)
     if not feats: return []
     sh = np.log1p([f[2] for f in feats]); sh = (sh - sh.mean()) / (sh.std() + 1e-6)
     sa = np.array([f[3] for f in feats]); sa = (sa - sa.mean()) / (sa.std() + 1e-6)
     out = []
-    for i, (k, face, _, _, bright) in enumerate(feats):
+    for i, (k, face, _, _, bright, dark, tl, ta, sig) in enumerate(feats):
         t = times[k] if k < len(times) else k * 2.0
         if t < dur * 0.02 or t > dur * 0.985: continue
         if any(a - 1 <= t <= b + 1 for a, b in skip): continue  # реклама
         sc = 3.0 * min(1.0, face * 25) + 0.7 * sh[i] + 0.35 * sa[i] - (2.5 if bright < 38 else 0) - (1.0 if bright > 235 else 0)
-        out.append({"t": t, "score": float(sc), "face": face > 0})
+        sc -= 4.0 if dark > 0.6 else (1.5 if dark > 0.4 else 0)          # чорні титри, затемнення
+        sc -= 1.3 * min(tl, 3) + 25 * ta                                   # вшиті написи, субтитри, титри
+        if sh[i] < -1.2: sc -= 1.5                                         # змазаний кадр
+        out.append({"t": t, "score": float(sc), "face": face > 0, "sig": [int(x) for x in sig], "txt": tl})
     return out
+
+
+def _text_lines(g):
+    """Грубий детектор вшитого тексту (титри, субтитри, плашки): горизонтальні контрастні смуги. -> (рядків, частка площі)"""
+    cv2 = _cv2(); h, w = g.shape
+    grad = cv2.morphologyEx(g, cv2.MORPH_GRADIENT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    _, bw = cv2.threshold(grad, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (7, 1)))
+    _, _, st, _ = cv2.connectedComponentsWithStats(bw)
+    n, area = 0, 0
+    for x, y, ww, hh, a in st[1:]:
+        if 4 <= hh <= h * 0.12 and ww >= hh * 2.2 and ww > w * 0.12 and a > 0.4 * ww * hh:
+            roi = g[y:y + hh, x:x + ww]
+            if roi.max() > 195 or roi.min() < 45: n += 1; area += ww * hh
+    return n, area / (h * w)
+
+
+def _sig_d(a, b):
+    """Відстань між «відбитками» кадрів (4×4 відтінок+яскравість): мала = та сама сцена."""
+    if not a or not b: return 999
+    a, b = np.array(a, np.float32).reshape(-1, 2), np.array(b, np.float32).reshape(-1, 2)
+    dh = np.abs(a[:, 0] - b[:, 0]); dh = np.minimum(dh, 180 - dh)
+    return float((dh * 0.6 + np.abs(a[:, 1] - b[:, 1])).mean())
 
 
 def _faces_small(g, img=None):
@@ -452,8 +481,12 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
     # вибір моментів: найкращі з відстанню між ними → у хронологічному порядку (історія), найсильніший — на дроп
     picks = []
     if video_pool:
-        for c in sorted(video_pool, key=lambda x: -x["score"]):
-            if all(abs(c["t"] - p["t"]) > 3.0 for p in picks): picks.append(c)
+        floor = sorted(c["score"] for c in video_pool)[len(video_pool) // 5]  # нижня п'ятірка — лише якщо зовсім нема з чого
+        for thr_d in (28, 16, 0):  # спершу різні сцени, потім м'якше
+            for c in sorted(video_pool, key=lambda x: -x["score"]):
+                if len(picks) >= n: break
+                if c in picks or (c["score"] < floor and thr_d): continue
+                if all(abs(c["t"] - p["t"]) > 3.0 and _sig_d(c.get("sig"), p.get("sig")) > thr_d for p in picks): picks.append(c)
             if len(picks) >= n: break
         while len(picks) < n: picks.append(rnd.choice(video_pool))
         best = max(picks, key=lambda x: x["score"])
@@ -572,6 +605,27 @@ def back_ease(x, s=1.9):
     x = min(1.0, max(0.0, x)) - 1; return 1 + x * x * ((s + 1) * x + s)
 
 
+def text_spot(mask, head, rc, key, box_h):
+    """Де поставити текст «за людиною», щоб його було видно: смуга, яку людина закриває на ~15–25 %
+    (зазвичай — на рівні маківки: голова врізається в середину слова, краї видно). Якщо людина закриває
+    будь-яке місце надто сильно — текст поступово виходить ПЕРЕД людину. -> (cy, сила «за людиною» 0..1)"""
+    prof = mask.mean(axis=1)  # частка рядка (на півроздільності), зайнята людиною
+    hb = max(2, int(box_h / 2)); c = np.concatenate([[0.0], np.cumsum(prof)])
+    best, bc = None, 9.0
+    want = head["top"] + box_h * 0.18
+    for y in range(int(max(H * 0.09, box_h * 0.6 + 40)), int(H * 0.66), 16):
+        y0, y1 = max(0, (y - box_h / 2) / 2), min(len(prof), (y + box_h / 2) / 2)
+        cov = float((c[int(y1)] - c[int(y0)]) / max(1, int(y1) - int(y0)))
+        cost = abs(cov - 0.18) * 3 + abs(y - want) / H * 1.2 + (0.4 if cov > 0.45 else 0)
+        if cost < bc: best, bc, bcov = y, cost, cov
+    prev = rc.get(("spot", key))
+    cy = best if prev is None else prev * 0.85 + best * 0.15  # без стрибків між кадрами
+    rc[("spot", key)] = cy
+    k = int(cy / 2); y0, y1 = max(0, k - hb // 2), min(len(prof), k + hb // 2)
+    cov = float(prof[y0:y1].mean()) if y1 > y0 else bcov
+    return cy, float(np.clip((0.62 - cov) / 0.3, 0.0, 1.0))
+
+
 def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
     st = ev["style"]; txt = ev["txt"].upper()
     dt = t - ev["t0"]; p = dt / max(0.05, ev["t1"] - ev["t0"])
@@ -581,31 +635,33 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
     acc, white = ev["color"], (246, 246, 246)
     person = mask is not None and head is not None
     hx = head["x"] if person else W / 2
-    cy = (head["cy"] + H * 0.10) if person else H * 0.42
+    cy, pb = H * 0.42, 0.0
+    if person:
+        cy, pb = text_spot(mask, head, rc, id(ev), H * (0.2 if st == "behind" else 0.15))
     pulse = 1 + 0.06 * beat_pulse
     if st == "behind":
         sz = fit_size(txt, FONT_BIG, W * 0.96, hi=560); spr = sprite(txt, sz, FONT_BIG, ev["fill"])
         s = (1.35 - 0.35 * k) * pulse
-        blend(frame, warp(glow(spr, acc, 18), s), W / 2, cy, mask, person, 0.55 * fade)
-        blend(frame, warp(spr, s), W / 2, cy + 40 * (1 - min(1, k)), mask, person, fade)
+        blend(frame, warp(glow(spr, acc, 18), s), W / 2, cy, mask, pb, 0.55 * fade)
+        blend(frame, warp(spr, s), W / 2, cy + 40 * (1 - min(1, k)), mask, pb, fade)
     elif st == "stack":
         sz = fit_size(txt, FONT_BIG, W * 0.9, hi=380)
         sol, out = sprite(txt, sz, FONT_BIG, acc), sprite(txt, sz, FONT_BIG, white, stroke=4, outline_only=True)
         gap = sol.shape[0] * 0.84; dx = 90 * (p - 0.5)
         for n, (spr, ox) in enumerate([(out, -dx), (sol, 0), (out, dx), (out, -dx * 0.5)][:3]):
             yy = cy + (n - 1) * gap
-            blend(frame, warp(spr, pulse if n == 1 else 1), W / 2 + ox, yy + 60 * (1 - min(1, k)) * (n - 1), mask, person, fade * (1 if n == 1 else min(1, k)))
+            blend(frame, warp(spr, pulse if n == 1 else 1), W / 2 + ox, yy + 60 * (1 - min(1, k)) * (n - 1), mask, pb, fade * (1 if n == 1 else min(1, k)))
     elif st == "split":  # верхня половина з одного боку, нижня — з іншого
         sz = fit_size(txt, FONT_BIG, W * 0.94, hi=520); spr = sprite(txt, sz, FONT_BIG, white)
         hh = spr.shape[0] // 2; e = ease(dt / 0.25)
-        blend(frame, spr[:hh], W / 2 - (1 - e) * W, cy - hh / 2, mask, person, fade)
-        blend(frame, tint(spr[hh:], acc), W / 2 + (1 - e) * W, cy + hh / 2, mask, person, fade)
+        blend(frame, spr[:hh], W / 2 - (1 - e) * W, cy - hh / 2, mask, pb, fade)
+        blend(frame, tint(spr[hh:], acc), W / 2 + (1 - e) * W, cy + hh / 2, mask, pb, fade)
     elif st == "wipe":  # контур, заливка біжить зліва направо
         sz = fit_size(txt, FONT_BIG, W * 0.94, hi=520)
         out, sol = sprite(txt, sz, FONT_BIG, white, stroke=5, outline_only=True), sprite(txt, sz, FONT_BIG, acc)
         cut = int(sol.shape[1] * min(1.0, p * 1.4)); part = sol.copy(); part[:, cut:, 3] = 0
-        blend(frame, warp(out, pulse), W / 2, cy, mask, person, fade)
-        blend(frame, warp(part, pulse), W / 2, cy, mask, person, fade)
+        blend(frame, warp(out, pulse), W / 2, cy, mask, pb, fade)
+        blend(frame, warp(part, pulse), W / 2, cy, mask, pb, fade)
     elif st == "cascade":  # літери падають по черзі з відскоком
         sz = fit_size(txt, FONT_BIG, W * 0.9, hi=300)
         from PIL import ImageFont
@@ -644,14 +700,14 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
         side = rc.setdefault(id(ev), random.choice([-1, 1]))
         x = (head["x0"] - 30 if side < 0 else head["x1"] + 30) if person else (W * 0.18 if side < 0 else W * 0.82)
         x = min(W - spr.shape[1] * 0.4, max(spr.shape[1] * 0.4, x))
-        blend(frame, spr, x, H * 0.48 - 220 * (1 - min(1, k)), mask, person, fade)
+        blend(frame, spr, x, H * 0.48 - 220 * (1 - min(1, k)), mask, pb, fade)
     elif st == "slam":  # слово «падає» на екран з величезного розміру й приземляється з поштовхом
         sz = fit_size(txt, FONT_BIG, W * 0.92, hi=480); spr = sprite(txt, sz, FONT_BIG, ev["fill"], stroke=4, stroke_fill=(10, 10, 10))
         q = min(1.0, dt / 0.16); sc = 2.4 - 1.4 * (1 - (1 - q) ** 4)
         land = max(0.0, dt - 0.16); shake = 14 * math.exp(-land / 0.06) if dt >= 0.16 else 0
         jx = rc.setdefault(("sx", id(ev)), random.choice([-1, 1])) * shake
-        blend(frame, warp(glow(spr, acc, 16), sc * pulse), W / 2 + jx, cy, mask, person, 0.5 * fade * q)
-        blend(frame, warp(spr, sc * pulse), W / 2 + jx, cy, mask, person, fade * min(1.0, q * 1.5))
+        blend(frame, warp(glow(spr, acc, 16), sc * pulse), W / 2 + jx, cy, mask, pb, 0.5 * fade * q)
+        blend(frame, warp(spr, sc * pulse), W / 2 + jx, cy, mask, pb, fade * min(1.0, q * 1.5))
     elif st == "waterfall":  # слова піднімаються знизу по черзі (stagger ≤ 0.4 с)
         words = txt.split()
         sz = fit_size(max(words, key=len), FONT_BIG, W * 0.86, hi=300)
@@ -661,7 +717,23 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
             if q <= 0: continue
             e = 1 - (1 - min(1.0, q)) ** 4
             spr = sprite(wd, sz, FONT_BIG, acc if i % 2 else white)
-            blend(frame, spr, W / 2, y0 + i * lh + 120 * (1 - e), mask, person, fade * min(1.0, q * 2))
+            blend(frame, spr, W / 2, y0 + i * lh + 120 * (1 - e), mask, pb, fade * min(1.0, q * 2))
+    elif st == "rise":  # слово виростає з «підлоги» (лінії під ним) — за людиною, як у плечей
+        sz = fit_size(txt, FONT_BIG, W * 0.95, hi=540); spr = sprite(txt, sz, FONT_BIG, ev["fill"])
+        h = spr.shape[0]; q = 1 - (1 - min(1.0, dt / 0.28)) ** 4; off = int((1 - q) * h)
+        if h - off > 2:
+            part = spr[:h - off]
+            blend(frame, warp(glow(part, acc, 14), pulse), W / 2, cy - h / 2 + off + part.shape[0] / 2, mask, pb, 0.45 * fade)
+            blend(frame, warp(part, pulse), W / 2, cy - h / 2 + off + part.shape[0] / 2, mask, pb, fade)
+    elif st == "deep":  # об'ємні літери: екструзія в глибину кольором акценту, лицьова сторона біла
+        sz = fit_size(txt, FONT_BIG, W * 0.86, hi=500)
+        face_, side_ = sprite(txt, sz, FONT_BIG, white), sprite(txt, sz, FONT_BIG, tuple(int(c * 0.55) for c in acc))
+        e = back_ease(dt / 0.3); sc_ = (0.7 + 0.3 * min(1.2, e)) * pulse
+        dirx = rc.setdefault(("dd", id(ev)), random.choice([-1, 1]))
+        depth = int(12 * min(1.0, dt / 0.25)) + 2
+        for z in range(depth, 0, -1):
+            blend(frame, warp(side_, sc_), W / 2 + dirx * z * 3, cy + z * 3, mask, pb, fade)
+        blend(frame, warp(face_, sc_), W / 2, cy, mask, pb, fade)
     else:  # rgb — велике слово з кольоровими «привидами»
         sz = fit_size(txt, FONT_BIG, W * 0.85, hi=420); spr = sprite(txt, sz, FONT_BIG, white)
         jit = 14 * (1 - min(1, dt / 0.3)) + 6 * beat_pulse
@@ -671,8 +743,8 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
 
 
 def style_events(ev, rnd, behind_ok, prefer=None):
-    pool = (["behind", "behind", "slam", "slam", "stack", "orbit", "orbit", "pop", "split", "wipe", "side", "cascade", "rgb"] if behind_ok
-            else ["slam", "slam", "stack", "split", "wipe", "cascade", "rgb", "pop", "behind"])
+    pool = (["behind", "behind", "rise", "deep", "slam", "slam", "stack", "orbit", "pop", "split", "wipe", "side", "cascade", "rgb"] if behind_ok
+            else ["slam", "slam", "stack", "split", "wipe", "cascade", "rgb", "pop", "behind", "rise", "deep"])
     last = []
     for k, e in enumerate(ev):
         src = prefer if (prefer and rnd.random() < 0.65) else pool
@@ -743,12 +815,13 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     vpool = None
     if meta.get("video"):
         cache = d / "vscan.json"
-        if cache.exists():
-            vpool = _json.loads(cache.read_text())
+        try: vpool = _json.loads(cache.read_text()) if cache.exists() else None
+        except Exception: vpool = None
+        if isinstance(vpool, dict) and vpool.get("v") == 2: vpool = vpool["items"]
         else:
             job.step("edit_scan", 60)
             vpool = scan_video(meta["video"], meta.get("duration") or 0, skip=(meta.get("info") or {}).get("skip") or [], job=job)
-            cache.write_text(_json.dumps(vpool))
+            cache.write_text(_json.dumps({"v": 2, "items": vpool}))
         for v in vpool:  # моменти, де щось відбувається за звуком/чатом, — трохи вище
             if any(abs(v["t"] - c["peak"]) < 4 for c in pool if c.get("final", 0) > 0.5): v["score"] += 0.6
         if len(vpool) < 8: vpool = None

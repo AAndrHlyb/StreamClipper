@@ -250,13 +250,13 @@ def tr_spin(fr, q, sign=1):
 # ------------------------------------------------------------------ стилі едіту (набір правил, з якого кожна генерація бере свій варіант)
 STYLES = {
     "hype":    {"trans": ["zoom", "glitch", "whip", "spin"], "looks": ["outline", "echo", "mirror", "colorpop", None, None],
-                "grade": ["punch", "warm"], "text": ["slam", "slam", "stack", "rgb", "behind", "pop", "cascade"], "cutout": 0.35, "flash": 3},
+                "grade": ["punch", "warm"], "text": ["slam", "slam", "stack", "rgb", "behind", "deep", "pop", "rise"], "cutout": 0.35, "flash": 3},
     "cinema":  {"trans": ["zoom", "iris", "whip"], "looks": ["letterbox", "bokeh", "spotlight", None, None],
-                "grade": ["warm", "cold"], "text": ["waterfall", "behind", "wipe", "split", "behind"], "cutout": 0.2, "flash": 1},
+                "grade": ["warm", "cold"], "text": ["waterfall", "behind", "rise", "wipe", "split", "behind"], "cutout": 0.2, "flash": 1},
     "neon":    {"trans": ["glitch", "pixel", "zoom"], "looks": ["outline", "spotlight", "echo", "tunnel", None],
-                "grade": ["cold", "punch"], "text": ["rgb", "orbit", "behind", "slam", "side"], "cutout": 0.3, "flash": 2},
+                "grade": ["cold", "punch"], "text": ["rgb", "orbit", "behind", "slam", "deep", "rise"], "cutout": 0.3, "flash": 2},
     "pop":     {"trans": ["whip", "shutter", "zoom", "iris"], "looks": ["colorpop", "popframe", "mirror", None, None],
-                "grade": ["punch", "warm"], "text": ["stack", "pop", "cascade", "slam", "orbit"], "cutout": 0.45, "flash": 2},
+                "grade": ["punch", "warm"], "text": ["stack", "pop", "deep", "slam", "orbit", "rise"], "cutout": 0.45, "flash": 2},
     "noir":    {"trans": ["zoom", "shutter", "glitch"], "looks": ["bwred", "bwred", "spotlight", "bokeh", None],
-                "grade": ["none"], "text": ["behind", "behind", "slam", "split", "waterfall"], "cutout": 0.25, "flash": 2},
+                "grade": ["none"], "text": ["behind", "rise", "slam", "deep", "waterfall"], "cutout": 0.25, "flash": 2},
 }
