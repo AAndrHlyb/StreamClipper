@@ -259,3 +259,12 @@ pre.log{background:var(--deep);border:1px solid var(--line);border-radius:8px;pa
 .comp video{max-width:960px}
 @media (max-width:700px){.cmode .lay{grid-template-columns:minmax(0,1fr)}.cmode .lay>div:last-child{order:-1}#mode{display:grid;grid-template-columns:1fr 1fr;overflow:visible}#mode button{min-width:0}}
 .comp.vert{max-width:360px}
+.editbox{display:none;margin-top:24px;padding-top:24px;border-top:1px solid var(--line)}
+.emode .editbox{display:block}
+.emode #lenf,.emode .substyle,.emode #subsf{display:none}
+.editbox .xgrid{margin-top:16px}
+.editbox label.btn{cursor:pointer}
+#etext{margin-top:8px}
+.emode .lay>div:last-child,.emode #layout [data-v=blur]{display:none}
+.emode .lay{grid-template-columns:1fr}
+.emode .fr{max-width:560px}

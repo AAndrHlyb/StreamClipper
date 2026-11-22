@@ -5,3 +5,4 @@ imageio-ffmpeg
 certifi
 segno
 opencv-python-headless>=4.8,<5
+pillow

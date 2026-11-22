@@ -77,7 +77,7 @@ def rmed(x, w, st=10):
     return np.interp(np.arange(len(x)), c, [np.median(x[max(0, i - w // 2): i + w // 2 + 1]) for i in c])
 
 
-def sm(x, k): return np.convolve(x, np.ones(k) / k, mode="same") if len(x) >= k else x
+def sm(x, k): return np.convolve(x, np.ones(k) / k, mode="same") if len(x) >= k else x.astype(float)
 
 
 def rz(x, w, fl):
@@ -103,8 +103,8 @@ def find_peaks(job, loud, chat, o, offset=0.0, vclips=(), used=(), keywords=()):
     n = len(loud)
     loud = loud.copy()
     sil = loud <= -60
-    run = np.convolve(sil.astype(float), np.ones(5), mode="same") >= 5
-    muted = np.convolve(run.astype(float), np.ones(121), mode="same") > 0
+    run = np.convolve(sil.astype(float), np.ones(5), mode="full")[2:2 + n] >= 5  # "full"+зріз: коротке відео не ламає довжину
+    muted = np.convolve(run.astype(float), np.ones(121), mode="full")[60:60 + n] > 0
     if run.any():
         job.log("muted", int(run.sum()))
         loud = np.where(sil, np.median(loud[~sil]) if (~sil).any() else -30, loud)
@@ -141,7 +141,7 @@ def find_peaks(job, loud, chat, o, offset=0.0, vclips=(), used=(), keywords=()):
     s[muted] = -1e9
     for a, b in used:  # уже нарезанное
         s[max(0, int(a - offset - 20)):max(0, int(b - offset + 20))] = -1e9
-    gap = max(o["min_len"] + 15, 45)
+    gap = o.get("peak_gap") or max(o["min_len"] + 15, 45)
     pk, lo = [], o["min_score"] * 0.6
     for i in np.argsort(-s):
         if s[i] < lo or len(pk) >= int(o["max_clips"] * 2): break

@@ -60,7 +60,7 @@ class Job:
 DEFAULTS = {"mode": "auto", "min_len": 60, "max_len": 90, "max_clips": 40, "min_score": 2.0, "layout": "blur", "cam": None,
             "subs": True, "model": None, "lang": None, "live_minutes": 0, "skip_start": 180, "seq_limit": 0,
             "speech_filter": True, "review": False, "censor": False, "censor_mode": "beep", "sub_style": {},
-            "hook": False, "zoom": False, "watermark": False, "cover": False, "denoise": False, "compile": False, "compile_min": 8, "teaser_sec": 30,
+            "hook": False, "zoom": False, "watermark": False, "cover": False, "denoise": False, "compile": False, "compile_min": 8, "teaser_sec": 30, "music": None, "music_start": 0, "edit_sec": 15, "edit_textmode": "lyrics", "edit_text": "", "edit_grade": "warm", "edit_behind": True, "edit_mute": False,
             "vclips": False, "keywords": [], "history": None, "gpu": None, "live_every": 8}
 
 
@@ -142,7 +142,7 @@ def _run(job):
     chat_f = None
     if info["platform"] != "file":
         full = info["platform"] not in ("twitch",) or mode == "seq"
-        if mode in ("best", "compile", "teaser") and info.get("duration"):
+        if mode in ("best", "compile", "teaser", "edit") and info.get("duration"):
             # чат качається одночасно зі звуком/відео — вони не залежать одне від одного
             chat_f = _POOL.submit(_chat, job, d, meta, info, 0, info["duration"], o, True)
         _download(job, d, meta, info["url"], full, 0, None, 2, 30)
@@ -153,10 +153,13 @@ def _run(job):
     if mode == "compile":  # один горизонтальний ролик 16:9 заданої довжини з найкращих моментів
         target = max(1.0, float(o.get("compile_min") or 8)) * 60
         o["max_clips"] = int(math.ceil(target / ((o["min_len"] + o["max_len"]) / 2) * 1.6)) + 2
+    if mode == "edit":
+        if not o.get("music") or not Path(o["music"]).exists(): raise RuntimeError("no_music")
+        o["max_clips"] = 18; o["min_len"], o["max_len"] = 8, 20; o["peak_gap"] = 15
     if mode == "teaser":  # потрібно ~ціль/2.6 с фраз, беремо з запасом; вікна аналізу короткі — швидше
         target = min(90.0, max(10.0, float(o.get("teaser_sec") or 30)))
-        o["max_clips"] = int(math.ceil(target / 2.6 * 1.5)) + 3; o["min_len"], o["max_len"] = 8, 20
-    if mode in ("best", "compile", "teaser"):
+        o["max_clips"] = int(math.ceil(target / 2.6 * 1.5)) + 3; o["min_len"], o["max_len"] = 8, 20; o["peak_gap"] = 15
+    if mode in ("best", "compile", "teaser", "edit"):
         if chat_f:
             if not chat_f.done(): job.step("download_chat", job.pct)
             chat = chat_f.result()
@@ -167,6 +170,8 @@ def _run(job):
         clips = _sequential(job, meta, o, n)
     if mode == "teaser":
         return _teaser_only(job, d, meta, o, clips)
+    if mode == "edit":
+        return _edit_only(job, d, meta, o, clips)
     clips = _review(job, clips)
     if mode == "compile":
         return _compile_only(job, d, meta, o, clips)
@@ -219,6 +224,43 @@ def _teaser_only(job, d, meta, o, clips):
     job.extra["teaser"] = p; job.extra["teaser_dur"] = round(dur_of(p))
     meta["teaser"] = p; meta["teaser_dur"] = job.extra["teaser_dur"]; jsave(d / "meta.json", meta)
     shutil.rmtree(d / "out" / "_w", ignore_errors=True); shutil.rmtree(d / "raw", ignore_errors=True)
+
+
+def _edit_pool(meta, clips):
+    """Моменти для едіту: найкращі + (для відео) рівномірні проби, щоб кадри були різні."""
+    pool = []
+    for c in clips:
+        pk = c.get("peak") or (c["start"] + c["end"]) / 2
+        pool.append({"peak": pk, "final": float(c.get("final") or 1), "lo": pk - 6, "hi": pk + 6})
+    if meta.get("video"):
+        n = meta.get("duration") or 0
+        step = max(4.0, n / 40)
+        for k in range(int(n // step)):
+            t = 3 + k * step
+            if t < n - 3 and all(abs(t - p["peak"]) > 4 for p in pool): pool.append({"peak": t, "final": 0.1, "lo": 0, "hi": n})
+        for p in pool: p["lo"], p["hi"] = 0, n
+    return pool
+
+
+def _edit_only(job, d, meta, o, clips, seed=1, name="edit_9x16.mp4"):
+    from . import edit as E
+    pool = _edit_pool(meta, clips or []) if clips is not None else jload(d / "edit_pool.json", [])
+    if not pool: raise RuntimeError("no_more")
+    jsave(d / "edit_pool.json", pool)
+    p, dur = E.make_edit(d, meta, pool, o, job, seed=seed, name=name)
+    job.extra["edit"] = p; job.extra["edit_dur"] = round(dur)
+    meta.setdefault("edits", []).append({"file": p, "dur": round(dur)}); meta["edit"] = p; meta["edit_dur"] = round(dur)
+    jsave(d / "meta.json", meta)
+    shutil.rmtree(d / "out" / "_e", ignore_errors=True)
+
+
+def reedit(d, job):
+    """«Ще варіант»: той самий трек і моменти, інша розкладка кадрів і стилів тексту."""
+    d = Path(d); meta = jload(d / "meta.json", {}) or {}
+    o = opts_of(meta.get("opts") or {}); job.opts = o; job.dir = d
+    n = len(meta.get("edits", [])) + 1
+    job.step("edit_beats", 60)
+    _edit_only(job, d, meta, o, None, seed=n * 7 + 3, name=f"edit_9x16_v{n}.mp4")
 
 
 def _download(job, d, meta, url, full, a, b, p0, p1):

@@ -95,12 +95,14 @@ def library():
             meta = C.jload(d / "meta.json", {}) or {}
             comp = meta.get("compilation") or (str(d / "out" / "compilation_16x9.mp4") if (d / "out" / "compilation_16x9.mp4").exists() else None)
             teas = meta.get("teaser") if meta.get("teaser") and Path(meta["teaser"]).exists() else None
-            if res or comp or teas:
+            edit = meta.get("edit") if meta.get("edit") and Path(meta["edit"]).exists() else None
+            if res or comp or teas or edit:
                 out.append({"dir": str(d), "title": (meta.get("info") or {}).get("title") or d.name, "src_dur": meta.get("duration") or 0,
                             "uploader": meta.get("uploader", ""), "results": res, "sources_deleted": bool(meta.get("sources_deleted")),
                             "sources_bytes": sum(f.stat().st_size for f in C.source_files(d)),
                             "compilation": comp, "compilation_dur": meta.get("compilation_dur"),
-                            "teaser": teas, "teaser_dur": meta.get("teaser_dur")})
+                            "teaser": teas, "teaser_dur": meta.get("teaser_dur"),
+                            "edit": edit, "edit_dur": meta.get("edit_dur")})
     return out[:40]
 
 
@@ -276,6 +278,21 @@ class H(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         try:
             if not self.authed(parse_qs(u.query)): return self.send(403, {"error": "forbidden"})
+            if u.path == "/api/upload":  # трек для едіту: сирі байти, ім'я в ?name=
+                n = int(self.headers.get("Content-Length") or 0)
+                if n <= 0 or n > 200 * 1024 * 1024: return self.send(413, {"error": "too_big"})
+                name = re.sub(r"[^\w.\-]+", "_", (parse_qs(u.query).get("name") or ["track.mp3"])[0])[-80:]
+                dst = C.OUT_ROOT / "_music"; dst.mkdir(parents=True, exist_ok=True)
+                f = dst / f"{uuid.uuid4().hex[:6]}_{name}"
+                with open(f, "wb") as fh:
+                    left = n
+                    while left > 0:
+                        chunk = self.rfile.read(min(1 << 20, left))
+                        if not chunk: break
+                        fh.write(chunk); left -= len(chunk)
+                dur = C.dur_of(f)
+                if not dur: f.unlink(missing_ok=True); return self.send(400, {"error": "bad_audio"})
+                return self.send(200, {"path": str(f), "dur": dur, "name": name})
             b = self.body(); p = u.path
             if p == "/api/probe":
                 info = S.probe(b["url"], bool(b.get("live")))
@@ -328,6 +345,17 @@ class H(BaseHTTPRequestHandler):
                     except Exception as e:
                         j.state, j.err = "error", str(e)
                 threading.Thread(target=go, daemon=True).start()
+                return self.send(200, {"job": jid})
+            if p == "/api/reedit":
+                if not allowed(b["dir"]): return self.send(403, {"error": "forbidden"})
+                jid = uuid.uuid4().hex[:8]; j = P.Job(jid, "", {}); JOBS[jid] = j
+
+                def go2():
+                    try:
+                        P.reedit(b["dir"], j); j.state = "done"; j.stage, j.pct = "done", 100
+                    except Exception as e:
+                        j.state, j.err = "error", str(e)
+                threading.Thread(target=go2, daemon=True).start()
                 return self.send(200, {"job": jid})
             if p == "/api/more":
                 if not allowed(b["dir"]): return self.send(403, {"error": "forbidden"})
