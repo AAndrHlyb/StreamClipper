@@ -7,6 +7,7 @@ from .core import (perf, OUT_ROOT, YTDLP, Cancelled, capture, dur_of, enforce_di
 from . import sources as S
 from .analysis import bounds, find_peaks, loudness, loudness_par, rerank, sequential, words_of
 from .render import compilation, render_clip, segment
+from . import render as R
 from concurrent.futures import ThreadPoolExecutor
 
 _POOL = ThreadPoolExecutor(8)  # фонові завдання (чат паралельно із завантаженням)
@@ -59,7 +60,7 @@ class Job:
 DEFAULTS = {"mode": "auto", "min_len": 60, "max_len": 90, "max_clips": 40, "min_score": 2.0, "layout": "blur", "cam": None,
             "subs": True, "model": None, "lang": None, "live_minutes": 0, "skip_start": 180, "seq_limit": 0,
             "speech_filter": True, "review": False, "censor": False, "censor_mode": "beep", "sub_style": {},
-            "hook": False, "zoom": False, "watermark": False, "cover": False, "denoise": False, "compile": False, "compile_min": 8,
+            "hook": False, "zoom": False, "watermark": False, "cover": False, "denoise": False, "compile": False, "compile_min": 8, "teaser_sec": 30,
             "vclips": False, "keywords": [], "history": None, "gpu": None, "live_every": 8}
 
 
@@ -141,7 +142,7 @@ def _run(job):
     chat_f = None
     if info["platform"] != "file":
         full = info["platform"] not in ("twitch",) or mode == "seq"
-        if mode in ("best", "compile") and info.get("duration"):
+        if mode in ("best", "compile", "teaser") and info.get("duration"):
             # чат качається одночасно зі звуком/відео — вони не залежать одне від одного
             chat_f = _POOL.submit(_chat, job, d, meta, info, 0, info["duration"], o, True)
         _download(job, d, meta, info["url"], full, 0, None, 2, 30)
@@ -152,7 +153,10 @@ def _run(job):
     if mode == "compile":  # один горизонтальний ролик 16:9 заданої довжини з найкращих моментів
         target = max(1.0, float(o.get("compile_min") or 8)) * 60
         o["max_clips"] = int(math.ceil(target / ((o["min_len"] + o["max_len"]) / 2) * 1.6)) + 2
-    if mode in ("best", "compile"):
+    if mode == "teaser":  # потрібно ~ціль/2.6 с фраз, беремо з запасом; вікна аналізу короткі — швидше
+        target = min(90.0, max(10.0, float(o.get("teaser_sec") or 30)))
+        o["max_clips"] = int(math.ceil(target / 2.6 * 1.5)) + 3; o["min_len"], o["max_len"] = 8, 20
+    if mode in ("best", "compile", "teaser"):
         if chat_f:
             if not chat_f.done(): job.step("download_chat", job.pct)
             chat = chat_f.result()
@@ -161,6 +165,8 @@ def _run(job):
         clips = _select(job, d, meta, o, 0, n, chat, used=history_used(meta["uploader"], meta["vid"]) if o["history"] else [])
     else:
         clips = _sequential(job, meta, o, n)
+    if mode == "teaser":
+        return _teaser_only(job, d, meta, o, clips)
     clips = _review(job, clips)
     if mode == "compile":
         return _compile_only(job, d, meta, o, clips)
@@ -177,6 +183,41 @@ def _compile_only(job, d, meta, o, clips):
     job.extra["compilation"] = p; job.extra["compilation_dur"] = round(dur_of(p))
     meta["compilation"] = p; meta["compilation_dur"] = job.extra["compilation_dur"]; jsave(d / "meta.json", meta)
     if o["history"]: history_add(meta["uploader"], meta["vid"], clips)
+    shutil.rmtree(d / "out" / "_w", ignore_errors=True); shutil.rmtree(d / "raw", ignore_errors=True)
+
+
+def _phrase(c):
+    """Найкраща коротка фраза (1.6–4 с) біля піку моменту, по межах слів."""
+    p = c.get("peak") or (c["start"] + c["end"]) / 2
+    ws = sorted([w for w in (c.get("_ws") or c.get("words") or []) if w.get("w")], key=lambda w: w["s"])
+    i = next((k for k, w in enumerate(ws) if w["e"] >= p - 0.8 and w["s"] <= p + 2.5), None)
+    if i is None: return max(0.0, p - 1.2), p + 1.8, []
+    st = ws[i]["s"] - 0.08; j = i
+    while j + 1 < len(ws) and ws[j + 1]["e"] - st <= 4.0 and ws[j + 1]["s"] - ws[j]["e"] < 0.45: j += 1
+    en = ws[j]["e"] + 0.15
+    if en - st < 1.6: en = st + 2.2
+    return st, en, ws[i:j + 1]
+
+
+def _teaser_only(job, d, meta, o, clips):
+    if not clips: job.log("no_more"); return
+    target = min(90.0, max(10.0, float(o.get("teaser_sec") or 30)))
+    snips, tot = [], 0.0
+    for c in sorted(clips, key=lambda c: -(c.get("final") or 0)):
+        st, en, ws = _phrase(c)
+        if any(abs(st - x["start"]) < 6 for x in snips): continue
+        snips.append({"start": st, "end": en, "words": ws, "peak": (st + en) / 2, "final": c.get("final") or 0})
+        tot += en - st
+        if tot >= target: break
+    top = max(snips, key=lambda x: x["final"])
+    snips = sorted([x for x in snips if x is not top], key=lambda x: x["start"]) + [top]  # хронологія, найсильніше — в кінці
+    for k, c in enumerate(snips, 1): c["k"] = k
+    jsave(d / "clips.json", snips)
+    job.step("teaser", 70)
+    p = R.teaser(d, meta, snips, o, job)
+    if not p: raise RuntimeError("compile_err")
+    job.extra["teaser"] = p; job.extra["teaser_dur"] = round(dur_of(p))
+    meta["teaser"] = p; meta["teaser_dur"] = job.extra["teaser_dur"]; jsave(d / "meta.json", meta)
     shutil.rmtree(d / "out" / "_w", ignore_errors=True); shutil.rmtree(d / "raw", ignore_errors=True)
 
 

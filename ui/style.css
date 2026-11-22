@@ -89,7 +89,7 @@ ul.plan li svg{margin-top:2px;color:var(--t3)}
 .grid,.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px}
 .grid{margin-top:24px;padding-top:24px;border-top:1px solid var(--line)}
 .grid>*,.grid2>*{min-width:0}
-label.f{display:flex;flex-direction:column;gap:8px;font-size:13px;color:var(--t2)}
+label.f,div.f{display:flex;flex-direction:column;gap:8px;font-size:13px;color:var(--t2)}
 .pair{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .pair input{width:76px}.pair select{flex:1;min-width:0}
 .lay{display:grid;grid-template-columns:1fr 296px;gap:24px;margin-top:24px;padding-top:24px;border-top:1px solid var(--line);align-items:start}
@@ -246,11 +246,16 @@ pre.log{background:var(--deep);border:1px solid var(--line);border-radius:8px;pa
 .av.ini{display:grid;place-items:center;font-weight:500;color:var(--t2)}
 .comp{margin-bottom:24px}
 .comp video{width:100%;aspect-ratio:16/9;background:#000;border-radius:12px;display:block;border:1px solid var(--line)}
-.cmode .lay>div:last-child,.cmode #layout,.cmode #acbtn{display:none}
-.cmode .lay{grid-template-columns:1fr}
+.cmode #layout,.cmode #acbtn,.cmode .fr,.cmode #fhint,.cmode .cap{display:none}
+.cmode .lay{grid-template-columns:minmax(0,1fr) minmax(0,1.5fr)}
+.cmode .phone{width:100%;max-width:640px;padding:8px;border-radius:14px;margin:0}
+.cmode .phone canvas{width:100%;height:auto;aspect-ratio:16/9;border-radius:8px}
+.tmode #lenf{display:none}
+.comp.vert video{max-width:360px;aspect-ratio:9/16}
 .updb{color:var(--t1)}
 .seg button{white-space:nowrap}
 .fmode{grid-column:1/-1}
-.cmode .fr{max-width:560px}
 .tl:empty{display:none}
 .comp video{max-width:960px}
+@media (max-width:700px){.cmode .lay{grid-template-columns:minmax(0,1fr)}.cmode .lay>div:last-child{order:-1}#mode{display:grid;grid-template-columns:1fr 1fr;overflow:visible}#mode button{min-width:0}}
+.comp.vert{max-width:360px}

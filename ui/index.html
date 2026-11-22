@@ -90,10 +90,10 @@
       </div>
     </div>
     <div class="grid">
-      <label class="f fmode"><span data-t="mode"></span>
-        <div class="seg" id="mode"><button data-v="best" data-t="m_best"></button><button data-v="seq" data-t="m_seq"></button><button data-v="compile" id="mcomp" data-t="m_compile"></button></div>
-      </label>
-      <label class="f"><span data-t="len"></span>
+      <div class="f fmode"><span data-t="mode"></span>
+        <div class="seg" id="mode"><button data-v="best" data-t="m_best"></button><button data-v="seq" data-t="m_seq"></button><button data-v="compile" id="mcomp" data-t="m_compile"></button><button data-v="teaser" id="mteas" data-t="m_teaser"></button></div>
+      </div>
+      <label class="f" id="lenf"><span data-t="len"></span>
         <div class="pair"><input type="number" id="mn" value="60" min="10" max="600"><span class="hint" data-t="to"></span><input type="number" id="mx" value="90" min="10" max="600">
         <select id="preset" onchange="setPreset(this.value)"><option value="" data-t="tpl"></option><option>15-30</option><option>30-60</option><option>60-90</option><option>90-180</option></select></div>
       </label>
@@ -181,7 +181,7 @@
       <button class="ghost" onclick="api('/api/open',{path:cur.dir+'/out'})"><svg class="i"><use href="#folder"/></svg><span data-t="open_dir"></span></button></div>
     <div class="tl" id="tl"></div>
     <div class="comp hide" id="compbox"><video controls preload="metadata" id="compv"></video>
-      <div class="row mt12"><b data-t="m_compile"></b><span class="tc" id="compd"></span><div class="sp"></div><a class="btn ghost" id="compdl"><svg class="i"><use href="#dl"/></svg><span data-t="download"></span></a></div></div>
+      <div class="row mt12"><b id="compn"></b><span class="tc" id="compd"></span><div class="sp"></div><a class="btn ghost" id="compdl"><svg class="i"><use href="#dl"/></svg><span data-t="download"></span></a></div></div>
     <div class="res" id="res"></div>
     <div class="hint mt16"><span data-t="captions_note"></span>. <span data-t="rate_note"></span></div>
     <div class="after hide" id="after">

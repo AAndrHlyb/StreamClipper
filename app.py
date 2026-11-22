@@ -94,11 +94,13 @@ def library():
             res = C.jload(d / "results.json") or []
             meta = C.jload(d / "meta.json", {}) or {}
             comp = meta.get("compilation") or (str(d / "out" / "compilation_16x9.mp4") if (d / "out" / "compilation_16x9.mp4").exists() else None)
-            if res or comp:
+            teas = meta.get("teaser") if meta.get("teaser") and Path(meta["teaser"]).exists() else None
+            if res or comp or teas:
                 out.append({"dir": str(d), "title": (meta.get("info") or {}).get("title") or d.name, "src_dur": meta.get("duration") or 0,
                             "uploader": meta.get("uploader", ""), "results": res, "sources_deleted": bool(meta.get("sources_deleted")),
                             "sources_bytes": sum(f.stat().st_size for f in C.source_files(d)),
-                            "compilation": comp, "compilation_dur": meta.get("compilation_dur")})
+                            "compilation": comp, "compilation_dur": meta.get("compilation_dur"),
+                            "teaser": teas, "teaser_dur": meta.get("teaser_dur")})
     return out[:40]
 
 

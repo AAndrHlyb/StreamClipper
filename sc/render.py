@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .core import perf, FONT, YTDLP, ffmpeg, run_proc, capture, settings, gpu_encoder, slug, hms, src_fps
+from .core import perf, dur_of, FONT, YTDLP, ffmpeg, run_proc, capture, settings, gpu_encoder, slug, hms, src_fps
 from .analysis import PROFANITY, pcm
 
 # ------------------------------------------------------------------ стили субтитров
@@ -253,6 +253,51 @@ def compilation(d, meta, clips, o, job, max_min=8):
     out = d / "out" / "compilation_16x9.mp4"
     run_proc([ffmpeg(), "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", "-movflags", "+faststart", out], job)
     for p in parts: p.unlink(missing_ok=True)
+    return str(out)
+
+
+def teaser(d, meta, snips, o, job):
+    """Короткий вертикальний тизер: фрази по 2–4 с, склейки з білим спалахом/наближенням, сповільнення останньої (кульмінації)."""
+    d = Path(d); parts = []
+    for i, c in enumerate(snips, 1):
+        job.check(); job.sub = f"{i}/{len(snips)}"; job.pct = max(job.pct, 70 + 22 * (i - 1) / len(snips))
+        r = render_clip(d, meta, {**c, "title": ""}, {**o, "cover": False, "watermark": o.get("watermark") and i == len(snips)}, job, 800 + i,
+                        out_name=f"_t{i:02d}.mp4", hook=False, zoom=True)
+        Path(r["preview"]).unlink(missing_ok=True); parts.append(Path(r["file"]))
+    if not parts: return None
+    slow = 0.6 if len(parts) >= 3 else 1.0  # кульмінація в кінці — сповільнено
+    T = 0.12; trans = ["fadewhite", "zoomin", "fadewhite", "slideup", "fadewhite", "circleopen"]
+    durs = []
+    for k, p in enumerate(parts):
+        dd = dur_of(p) or 2.0
+        durs.append(dd / slow if k == len(parts) - 1 else dd)
+    g = []
+    for k in range(len(parts)):
+        last = k == len(parts) - 1
+        g.append(f"[{k}:v]{'setpts=PTS/' + str(slow) + ',' if last and slow < 1 else ''}fps=30,settb=AVTB,format=yuv420p,setsar=1[v{k}]")
+        g.append(f"[{k}:a]{'atempo=' + str(slow) + ',' if last and slow < 1 else ''}aresample=48000,asetpts=PTS-STARTPTS[a{k}]")
+    vcur, acur, off = "v0", "a0", 0.0
+    for k in range(1, len(parts)):
+        off += durs[k - 1] - T
+        g.append(f"[{vcur}][v{k}]xfade=transition={trans[(k - 1) % len(trans)]}:duration={T}:offset={off:.3f}[x{k}]")
+        g.append(f"[{acur}][a{k}]acrossfade=d={T}[y{k}]")
+        vcur, acur = f"x{k}", f"y{k}"
+    total = sum(durs) - T * (len(parts) - 1)
+    g.append(f"[{vcur}]fade=t=out:st={max(0, total - 0.3):.3f}:d=0.3[v];[{acur}]afade=t=out:st={max(0, total - 0.3):.3f}:d=0.3[a]")
+    out = d / "out" / "teaser_9x16.mp4"
+    inputs = []
+    for p in parts: inputs += ["-i", p.resolve()]
+    enc, eargs = encoder_args(o)
+    base = [ffmpeg(), "-y", "-v", "error", *inputs, "-filter_complex", ";".join(g), "-map", "[v]", "-map", "[a]"]
+    tail = ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out.resolve()]
+    try:
+        run_proc(base + eargs + tail, job)
+    except Exception:
+        if enc == "libx264": raise
+        run_proc(base + encoder_args({**o, "gpu": False})[1] + tail, job)
+    for p in parts: p.unlink(missing_ok=True)
+    run_proc([ffmpeg(), "-y", "-v", "error", "-ss", f"{total * 0.5:.2f}", "-i", out, "-frames:v", "1", "-vf", "scale=360:-2",
+              out.with_name("teaser_9x16_preview.jpg")], job, check=False)
     return str(out)
 
 
