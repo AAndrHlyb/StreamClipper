@@ -173,9 +173,130 @@ def look_popframe(fr, m, head, lt, d, st, acc):
     return (bg * (1 - M) + fr * M).astype(np.uint8)
 
 
+
+
+# ------------------------------------------------------------------ нові образи (за референсами: стікер, світіння, тепловізор, змаз пікселів, лінза)
+def look_sticker(fr, m, head, lt, d, st, acc):
+    """Стоп-кадр-«наліпка»: кадр завмирає фотокарткою з білою рамкою й тінню над розмитим живим фоном,
+    злегка повернутий; в кінці шоту картка «відлітає» назад у кадр."""
+    cv2 = _cv2()
+    if "frz" not in st: st["frz"] = fr.copy(); st["ang"] = float(np.random.uniform(-7, 7))
+    k = ease_out(lt / 0.22); out_k = ease_io(max(0.0, (lt - (d - 0.18)) / 0.18))
+    s = 1 - 0.3 * k * (1 - out_k)
+    if s > 0.995: return fr
+    bg = (cv2.GaussianBlur(fr, (0, 0), 18).astype(np.float32) * (1 - 0.35 * k)).astype(np.uint8)
+    card = st["frz"]; b = 16
+    framed = cv2.copyMakeBorder(card, b * 3, b * 3, b * 3, b * 3, cv2.BORDER_CONSTANT, value=(246, 246, 246))
+    fh, fw = framed.shape[:2]
+    M = cv2.getRotationMatrix2D((fw / 2, fh / 2), st["ang"] * k * (1 - out_k), s * min(W / fw, H / fh))
+    M[0, 2] += W / 2 - fw / 2; M[1, 2] += H / 2 - fh / 2
+    warped = cv2.warpAffine(framed, M, (W, H), flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0))
+    mk = cv2.warpAffine(np.full((fh, fw), 255, np.uint8), M, (W, H))
+    sh = cv2.GaussianBlur(np.roll(mk, (24, 18), (0, 1)), (0, 0), 18).astype(np.float32)[..., None] / 255 * 0.6
+    out = bg.astype(np.float32) * (1 - sh)
+    a = mk.astype(np.float32)[..., None] / 255
+    return (out * (1 - a) + warped * a).astype(np.uint8)
+
+
+def look_glow(fr, m, head, lt, d, st, acc):
+    """М'яке світіння світлих місць (bloom) + легкий підйом тіней — «дорога» картинка."""
+    cv2 = _cv2()
+    f = fr.astype(np.float32)
+    hi = np.clip(f - 150, 0, 255) * 1.6
+    small = cv2.resize(hi, (W // 4, H // 4), interpolation=cv2.INTER_AREA)
+    bl = cv2.resize(cv2.GaussianBlur(small, (0, 0), 9), (W, H), interpolation=cv2.INTER_LINEAR)
+    k = ease_out(lt / 0.2)
+    return np.clip(f * (1 - 0.06 * k) + 10 * k + bl * 0.75 * k, 0, 255).astype(np.uint8)
+
+
+def look_thermal(fr, m, head, lt, d, st, acc):
+    """Тепловізор/соляризація фону (помаранчево-фіолетова карта), людина — у звичайних кольорах."""
+    cv2 = _cv2()
+    g = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+    th = cv2.applyColorMap(cv2.equalizeHist(g), cv2.COLORMAP_INFERNO)
+    k = ease_out(lt / 0.12)
+    if m is None: return cv2.addWeighted(fr, 1 - 0.8 * k, th, 0.8 * k, 0)
+    M = full_mask(m) * k
+    bgm = 1 - M
+    return (fr * (1 - bgm * 0.85) + th * bgm * 0.85).astype(np.uint8)
+
+
+def look_smear(fr, m, head, lt, d, st, acc):
+    """Пікселі розтягуються від однієї колонки до краю (pixel smear), межа рухається — як у динамічних едітах."""
+    cv2 = _cv2()
+    if "sx" not in st: st["sx"] = float(np.random.uniform(0.22, 0.34)); st["side"] = int(np.random.choice([-1, 1]))
+    x = int(W * (st["sx"] + 0.08 * math.sin(lt * 5)))
+    out = fr.copy()
+    if st["side"] < 0:
+        col = cv2.GaussianBlur(fr[:, x:x + 1], (1, 0), sigmaX=1, sigmaY=3); out[:, :x] = col
+    else:
+        x = W - x; col = cv2.GaussianBlur(fr[:, x - 1:x], (1, 0), sigmaX=1, sigmaY=3); out[:, x:] = col
+    if m is not None:  # людина лишається поверх розмазаного фону
+        M = full_mask(m); out = (out * (1 - M) + fr * M).astype(np.uint8)
+    return out
+
+
+_BULGE = {}
+
+
+def look_bulge(fr, m, head, lt, d, st, acc):
+    """Лінза-«риб'яче око» на обличчі: голова роздувається на удар і повертається (смішний акцент)."""
+    cv2 = _cv2()
+    if head is None: return fr
+    cx, cy = int(head["x"]) // 40 * 40, int(head["cy"] + 60) // 40 * 40
+    q = math.sin(math.pi * min(1.0, lt / 0.45)) if lt < 0.45 else 0.0
+    if q < 0.02: return fr
+    r = int(max(180, (head["x1"] - head["x0"]) * 0.55))
+    key = (cx, cy, r)
+    if key not in _BULGE:
+        if len(_BULGE) > 8: _BULGE.clear()
+        yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+        dx, dy = xx - cx, yy - cy; dist = np.sqrt(dx * dx + dy * dy) / r
+        _BULGE[key] = (dx, dy, dist)
+    dx, dy, dist = _BULGE[key]
+    f = np.where(dist < 1, np.power(np.clip(dist, 1e-3, 1), 0.6 * q), 1.0).astype(np.float32)
+    mx = (cx + dx * f).astype(np.float32); my = (cy + dy * f).astype(np.float32)
+    return cv2.remap(fr, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+
+
 LOOKS = {"spotlight": look_spotlight, "colorpop": look_colorpop, "bwred": look_bwred, "bokeh": look_bokeh, "outline": look_outline,
-         "echo": look_echo, "tunnel": look_tunnel, "mirror": look_mirror, "letterbox": look_letterbox, "popframe": look_popframe}
-PERSON_LOOKS = {"spotlight", "colorpop", "bwred", "bokeh", "outline", "echo", "popframe", "tunnel"}
+         "echo": look_echo, "tunnel": look_tunnel, "mirror": look_mirror, "letterbox": look_letterbox, "popframe": look_popframe,
+         "sticker": look_sticker, "glow": look_glow, "thermal": look_thermal, "smear": look_smear, "bulge": look_bulge}
+PERSON_LOOKS = {"spotlight", "colorpop", "bwred", "bokeh", "outline", "echo", "popframe", "tunnel", "bulge"}
+
+
+# ------------------------------------------------------------------ акценти на удар (2–4 кадри)
+def hit_silhouette(fr, m, q, color=(255, 255, 255)):
+    """Людина спалахує білим силуетом із сяйвом, фон темнішає (як у референсах на сильну долю)."""
+    cv2 = _cv2()
+    if m is None or q <= 0: return fr
+    M = full_mask(m)
+    glow = cv2.GaussianBlur(M[..., 0], (0, 0), 22)[..., None]
+    col = np.array(color, np.float32)[None, None, :]
+    out = fr.astype(np.float32) * (1 - 0.75 * q)
+    out = out + glow * col * 0.8 * q
+    out = out * (1 - M * q) + col * M * q
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def hit_invert(fr, q):
+    """Інверсія кольорів на удар (негатив-спалах)."""
+    if q <= 0: return fr
+    inv = 255 - fr
+    return (fr * (1 - q) + inv * q).astype(np.uint8)
+
+
+def blackout(fr, m, lt, d, color):
+    """Пауза перед дропом: чорний екран; у другій половині з темряви проступає неоновий контур людини."""
+    cv2 = _cv2()
+    out = np.zeros_like(fr)
+    if m is None or lt < d * 0.45: return out
+    q = min(1.0, (lt - d * 0.45) / max(0.08, d * 0.4))
+    mm = (cv2.resize(m, (W, H)) > 0.5).astype(np.uint8) * 255
+    edge = cv2.morphologyEx(mm, cv2.MORPH_GRADIENT, np.ones((9, 9), np.uint8)).astype(np.float32) / 255
+    g = cv2.GaussianBlur(edge, (0, 0), 14)
+    col = np.array(color, np.float32)[None, None, :]
+    return np.clip((edge[..., None] * 1.0 + g[..., None] * 1.6) * col * q, 0, 255).astype(np.uint8)
 
 
 # ------------------------------------------------------------------ виїзд людини на своє місце (cutout)
@@ -260,3 +381,63 @@ STYLES = {
     "noir":    {"trans": ["zoom", "shutter", "glitch"], "looks": ["bwred", "bwred", "spotlight", "bokeh", None],
                 "grade": ["none"], "text": ["behind", "rise", "slam", "deep", "waterfall"], "cutout": 0.25, "flash": 2},
 }
+
+
+# ------------------------------------------------------------------ «режисер»: кожному кадру — найкращий ефект під музику й картинку
+# c — контекст шоту: sec (intro/build/pre/drop/peak/resolve), en (енергія), br (яскравість звуку), bass, busy (щільність ударів),
+# st (сила долі), d (тривалість), face (є обличчя), fs (розмір обличчя), fbr (яскравість кадру 0..1), fsa (насиченість, z)
+_ON = lambda c, *secs: 1.0 if c["sec"] in secs else 0.0
+LOOK_RULES = {
+    None:        lambda c: 0.55 + 0.6 * _ON(c, "intro", "resolve") + (0.5 if c["d"] < 0.35 else 0),
+    "spotlight": lambda c: 0.8 * c["face"] + 0.5 * _ON(c, "build", "pre") + 0.3 * (1 - c["fbr"]),
+    "colorpop":  lambda c: 0.7 * c["face"] + 0.4 * max(0.0, c["fsa"]) + 0.3 * _ON(c, "peak"),
+    "bwred":     lambda c: 0.6 * c["face"] + 0.5 * (1 - c["br"]) + 0.3 * _ON(c, "pre", "drop"),
+    "bokeh":     lambda c: 0.7 * c["face"] + 0.6 * _ON(c, "intro", "build") + 0.3 * (1 - c["en"]),
+    "outline":   lambda c: 0.8 * c["face"] + 0.5 * c["br"] + 0.4 * c["en"],
+    "echo":      lambda c: 0.6 * c["face"] + 0.6 * c["busy"] + 0.3 * _ON(c, "peak"),
+    "tunnel":    lambda c: 0.6 * (1 - c["face"]) + 0.5 * c["en"] + 0.4 * _ON(c, "drop", "peak"),
+    "mirror":    lambda c: 0.7 * (1 - c["face"]) + 0.3 * _ON(c, "build"),
+    "letterbox": lambda c: 0.7 * _ON(c, "intro", "resolve") + 0.4 * (1 - c["en"]),
+    "popframe":  lambda c: 0.6 * c["face"] + 0.4 * _ON(c, "build") + 0.2 * (c["d"] > 0.6),
+    "sticker":   lambda c: 0.6 * (c["d"] >= 0.7) + 0.5 * _ON(c, "intro", "build", "resolve") + 0.2 * c["face"] - 0.8 * (c["d"] < 0.5),
+    "glow":      lambda c: 0.7 * c["br"] + 0.4 * c["fbr"] + 0.3 * _ON(c, "intro", "resolve"),
+    "thermal":   lambda c: 0.5 * c["face"] + 0.7 * c["bass"] * c["en"] + 0.4 * _ON(c, "drop", "peak"),
+    "smear":     lambda c: 0.4 * (c["fs"] < 0.08) + 0.5 * c["busy"] + 0.3 * _ON(c, "build", "peak"),
+    "bulge":     lambda c: (0.9 if c["fs"] > 0.03 else -1) * (0.7 if c["sec"] in ("drop", "peak") else 0.2) + 0.3 * c["st"],
+}
+TRANS_RULES = {
+    "cut":     lambda c: 0.55 + 0.4 * _ON(c, "peak") * c["busy"],
+    "zoom":    lambda c: 0.45 + 0.8 * _ON(c, "drop") + 0.3 * c["en"] + 0.3 * _ON(c, "build"),
+    "whip":    lambda c: 0.35 + 0.6 * c["busy"] + 0.2 * _ON(c, "peak"),
+    "glitch":  lambda c: 0.6 * c["br"] + 0.4 * c["busy"],
+    "spin":    lambda c: 0.5 * _ON(c, "drop", "peak") + 0.3 * c["st"],
+    "pixel":   lambda c: 0.4 * c["br"] + 0.3 * _ON(c, "build"),
+    "iris":    lambda c: 0.6 * _ON(c, "intro", "resolve", "build") + 0.3 * (1 - c["en"]),
+    "shutter": lambda c: 0.5 * _ON(c, "build") + 0.3 * c["busy"],
+    "dip":     lambda c: 0.9 * _ON(c, "intro", "resolve") * (1 - c["en"]) - 0.6 * _ON(c, "peak", "drop"),
+}
+HIT_RULES = {  # акцент на початку шоту на сильну долю
+    None:         lambda c: 0.5,
+    "flash":      lambda c: 0.45 + 0.4 * _ON(c, "drop") + 0.2 * c["br"],
+    "silhouette": lambda c: (0.7 if c["face"] else -2) + 0.4 * c["br"] + 0.3 * _ON(c, "drop"),
+    "invert":     lambda c: 0.35 + 0.5 * c["bass"] + 0.2 * c["busy"],
+}
+
+
+def choose(rules, c, rnd, prefer=(), used=None, prev=None, bonus=0.55, noise=0.4, person_only=()):
+    """Найкращий варіант за правилами + перевага стилю + штраф за повтори + трохи випадковості (кожен едіт інший)."""
+    used = used if used is not None else {}
+    best, bs = None, -9e9
+    for k, f in rules.items():
+        try: sc = float(f(c))
+        except Exception: continue
+        if k in prefer: sc += bonus
+        if k is not None:
+            sc -= 0.6 * used.get(k, 0)
+            if k == prev: sc -= 1.5
+            if k in person_only and not c["face"]: sc -= 1.2
+        sc += rnd.uniform(0, noise)
+        if sc > bs: best, bs = k, sc
+    if best is not None: used[best] = used.get(best, 0) + 1
+    return best
+
