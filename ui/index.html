@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StreamClipper</title>
+<link rel="stylesheet" href="/ui/style.css">
+<script src="/ui/i18n.js"></script>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+  <symbol id="refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol>
+  <symbol id="scissors" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><path d="M8.12 8.12 12 12"/><path d="M20 4 8.12 15.88"/><circle cx="6" cy="18" r="3"/><path d="M14.8 14.8 20 20"/></symbol>
+  <symbol id="check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+  <symbol id="back" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+  <symbol id="pencil" viewBox="0 0 24 24"><path d="M21.17 6.81a1 1 0 0 0-3.99-3.99L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.62l4.35-1.32a2 2 0 0 0 .83-.5z"/></symbol>
+  <symbol id="up" viewBox="0 0 24 24"><path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/></symbol>
+  <symbol id="down" viewBox="0 0 24 24"><path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"/></symbol>
+  <symbol id="dl" viewBox="0 0 24 24"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></symbol>
+  <symbol id="trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></symbol>
+  <symbol id="plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+  <symbol id="scan" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="square" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/></symbol>
+</svg>
+<header>
+  <div class="brand"><svg viewBox="0 0 14 22"><rect x=".75" y=".75" width="12.5" height="20.5" rx="2.5" fill="none" stroke="#ededed" stroke-width="1.5"/><rect x="3" y="12" width="8" height="2" rx="1" fill="#ffe500"/></svg>StreamClipper</div>
+  <nav id="tabs">
+    <button data-tab="cut" data-t="tab_cut"></button><button data-tab="channels" data-t="tab_channels"></button>
+    <button data-tab="queue" data-t="tab_queue"></button><button data-tab="lib" data-t="tab_lib"></button><button data-tab="set" data-t="tab_set"></button>
+  </nav>
+  <div class="sp"></div>
+  <div class="status"><span class="dot" id="hd"></span><span id="hc"></span></div>
+  <button class="ghost" onclick="api('/api/open',{})"><svg class="i"><use href="#folder"/></svg><span data-t="folder"></span></button>
+</header>
+<main>
+<!-- ============ НАРІЗКА ============ -->
+<div id="p-cut" class="page">
+  <h1 data-t="h1"></h1>
+  <p class="lead" data-t="lead"></p>
+  <section>
+    <div class="sh"><span class="n">01</span><h2 data-t="link"></h2></div>
+    <div class="row">
+      <input id="url" type="text" data-tp="ph_url" autofocus>
+      <button class="pri big" id="pbtn" onclick="doProbe()" data-t="open"></button>
+    </div>
+    <div id="perr" class="err"></div>
+  </section>
+
+  <section class="hide" id="sch">
+    <div class="sh"><span class="n">02</span><h2><span data-t="ch_streams"></span> <span id="chn" class="hint"></span></h2></div>
+    <div class="onair hide" id="lv">
+      <img id="lvav" class="av" alt=""><span class="dot live"></span>
+      <div class="t"><div class="ti" id="lvt"></div><div class="hint" data-t="on_air"></div></div>
+      <button onclick="pickLive()"><span data-t="take_live"></span><svg class="i"><use href="#right"/></svg></button>
+    </div>
+    <div class="row">
+      <div class="seg" id="per"><button data-v="7" data-t="week"></button><button data-v="30" data-t="month"></button><button data-v="365" data-t="year"></button><button data-v="0" data-t="all_time"></button></div>
+      <div class="seg" id="typ"><button data-v="archive" data-t="t_archive"></button><button data-v="highlight" data-t="t_highlight"></button><button data-v="upload" data-t="t_upload"></button><button data-v="all" data-t="t_all"></button></div>
+    </div>
+    <div class="hint mt12" data-t="keep_note"></div>
+    <div class="vlist" id="vl"></div>
+  </section>
+
+  <section class="hide" id="s2">
+    <div class="sh"><span class="n">03</span><h2 data-t="plan_h"></h2><div class="sp"></div><button class="ghost hide" id="bk" onclick="backToChannel()"><svg class="i"><use href="#back"/></svg><span data-t="other_stream"></span></button></div>
+    <div class="info">
+      <div class="thumb"><img id="th" alt=""></div>
+      <div>
+        <div class="ttl" id="tt"></div>
+        <div class="sub"><span id="tu"></span><span class="tc" id="td"></span></div>
+        <div class="note hide" id="tn"></div>
+        <ul class="plan" id="plan"></ul>
+        <div class="est" id="est"></div>
+      </div>
+    </div>
+    <div class="livebox hide" id="livebox">
+      <div class="row"><span class="dot live"></span><b data-t="live_h"></b></div>
+      <div class="hint mt8" data-t="live_note"></div><div class="hint mt4" id="livekind"></div>
+      <div class="grid2 mt12">
+        <label class="f"><span data-t="live_min"></span><input type="number" id="livem" value="0" min="0" max="1440"></label>
+        <label class="f"><span data-t="live_every"></span><input type="number" id="livee" value="8" min="3" max="60"></label>
+      </div>
+    </div>
+    <div class="grid">
+      <label class="f"><span data-t="mode"></span>
+        <div class="seg" id="mode"><button data-v="best" data-t="m_best"></button><button data-v="seq" data-t="m_seq"></button></div>
+      </label>
+      <label class="f"><span data-t="len"></span>
+        <div class="pair"><input type="number" id="mn" value="60" min="10" max="600"><span class="hint" data-t="to"></span><input type="number" id="mx" value="90" min="10" max="600">
+        <select id="preset" onchange="setPreset(this.value)"><option value="" data-t="tpl"></option><option>15-30</option><option>30-60</option><option>60-90</option><option>90-180</option></select></div>
+      </label>
+      <label class="f"><span id="cntl" data-t="max_clips"></span><input type="number" id="cnt" value="40" min="0" max="500"></label>
+      <label class="f"><span data-t="subs"></span>
+        <div class="pair"><select id="subs"><option value="1" data-t="on"></option><option value="0" data-t="off"></option></select>
+        <select id="model"><option value="base" data-t="mdl_base"></option><option value="small" data-t="mdl_small"></option><option value="medium" data-t="mdl_medium"></option></select></div>
+        <span class="hint" data-t="sub_lang_note"></span>
+      </label>
+    </div>
+
+    <div class="lay">
+      <div>
+        <div class="row mb12">
+          <div class="seg" id="layout"><button data-v="cam" data-t="l_cam"></button><button data-v="blur" data-t="l_blur"></button><button data-v="full" data-t="l_full"></button></div>
+          <div class="sp"></div>
+          <button class="ghost" id="acbtn" onclick="autoCam()"><svg class="i"><use href="#scan"/></svg><span data-t="auto_cam"></span></button>
+          <button class="ghost" onclick="loadFrame()"><svg class="i"><use href="#refresh"/></svg><span data-t="other_frame"></span></button>
+        </div>
+        <div class="fr"><canvas id="fc" width="960" height="540"></canvas></div>
+        <div class="hint mt8" id="fhint"></div>
+        <div class="substyle">
+          <div class="lbl" data-t="style"></div>
+          <div class="row">
+            <div class="seg" id="sp"><button data-v="classic" data-t="st_classic"></button><button data-v="green" data-t="st_green"></button><button data-v="minimal" data-t="st_minimal"></button><button data-v="box" data-t="st_box"></button></div>
+            <div class="seg" id="ss"><button data-v="s">S</button><button data-v="m">M</button><button data-v="l">L</button></div>
+          </div>
+          <div class="row mt8">
+            <div class="seg" id="spos"><button data-v="auto" data-t="p_auto"></button><button data-v="middle" data-t="p_middle"></button><button data-v="top" data-t="p_top"></button></div>
+            <div class="seg" id="sw"><button data-v="1">1</button><button data-v="2">2</button><button data-v="3">3</button></div><span class="hint" data-t="words"></span>
+            <label class="tg"><input type="checkbox" id="scaps" checked><i></i><span data-t="caps"></span></label>
+            <select id="sfont"><option value="Montserrat ExtraBold">Montserrat</option><option value="Arial">Arial</option><option value="Impact">Impact</option></select>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="phone"><canvas id="pc" width="540" height="960"></canvas></div>
+        <div class="hint cap" data-t="looks"></div>
+      </div>
+    </div>
+
+    <details class="extras" id="extras">
+      <summary><span data-t="extras"></span> <span class="hint" data-t="extras_note"></span> <span class="tc" id="xcount"></span></summary>
+      <div class="xgrid">
+        <label class="x"><input type="checkbox" id="x_speech" checked><i></i><div><b data-t="x_speech"></b><span data-t="x_speech_d"></span></div></label>
+        <label class="x"><input type="checkbox" id="x_review"><i></i><div><b data-t="x_review"></b><span data-t="x_review_d"></span></div></label>
+        <label class="x"><input type="checkbox" id="x_censor"><i></i><div><b data-t="x_censor"></b><span data-t="x_censor_d"></span>
+          <select id="x_censor_mode" class="mini"><option value="beep" data-t="c_beep"></option><option value="mute" data-t="c_mute"></option></select></div></label>
+        <label class="x"><input type="checkbox" id="x_hook"><i></i><div><b data-t="x_hook"></b><span data-t="x_hook_d"></span></div></label>
+        <label class="x"><input type="checkbox" id="x_zoom"><i></i><div><b data-t="x_zoom"></b><span data-t="x_zoom_d"></span></div></label>
+        <label class="x"><input type="checkbox" id="x_wm"><i></i><div><b data-t="x_wm"></b><span data-t="x_wm_d"></span></div></label>
+        <label class="x"><input type="checkbox" id="x_cover"><i></i><div><b data-t="x_cover"></b><span data-t="x_cover_d"></span></div></label>
+        <label class="x"><input type="checkbox" id="x_denoise"><i></i><div><b data-t="x_denoise"></b><span data-t="x_denoise_d"></span></div></label>
+        <label class="x"><input type="checkbox" id="x_compile"><i></i><div><b data-t="x_compile"></b><span data-t="x_compile_d"></span></div></label>
+        <label class="x"><input type="checkbox" id="x_vclips"><i></i><div><b data-t="x_vclips"></b><span data-t="x_vclips_d"></span></div></label>
+        <label class="x"><input type="checkbox" id="x_hist"><i></i><div><b data-t="x_hist"></b><span data-t="x_hist_d"></span></div></label>
+        <label class="x"><input type="checkbox" id="x_gpu"><i></i><div><b data-t="x_gpu"></b><span class="tc" id="gpuname"></span></div></label>
+        <label class="x wide"><input type="checkbox" id="x_kw"><i></i><div><b data-t="x_kw"></b><input type="text" id="kw" data-tp="x_kw_ph"></div></label>
+      </div>
+    </details>
+    <div class="go-row">
+      <button class="pri big" id="go" onclick="start()"><svg class="i"><use href="#scissors"/></svg><span id="golbl" data-t="start"></span></button>
+      <button class="ghost hide" id="profbtn" onclick="saveProfile()" data-t="save_prof"></button>
+      <span class="hint" data-t="hide_note"></span>
+    </div>
+  </section>
+
+  <section class="hide" id="s3">
+    <div class="sh"><span class="n">04</span><h2 id="stg" data-t="work"></h2><span class="tc" id="sub"></span><div class="sp"></div><span class="tc" id="elp"></span>
+      <button class="ghost hide" id="stopbtn" onclick="stopLive()"><svg class="i"><use href="#square"/></svg><span data-t="stop_live"></span></button>
+      <button class="ghost" id="cbtn" onclick="cancel()"><svg class="i"><use href="#x"/></svg><span data-t="cancel"></span></button></div>
+    <div class="bar"><i id="pbar"></i></div>
+    <pre class="log" id="log"></pre>
+    <div id="jerr" class="err"></div>
+  </section>
+
+  <section class="hide" id="srv">
+    <div class="sh"><span class="n">05</span><h2 data-t="rv_h"></h2><div class="sp"></div><button class="pri" onclick="sendReview()" data-t="rv_go"></button></div>
+    <div class="hint mb12" data-t="rv_note"></div>
+    <audio id="rvaudio" class="hide"></audio>
+    <div id="rvl" class="rvl"></div>
+  </section>
+
+  <section class="hide" id="s4">
+    <div class="sh"><span class="n">06</span><h2><span data-t="ready"></span> <span class="hint" id="rc"></span></h2><div class="sp"></div>
+      <a class="btn ghost hide" id="complink" target="_blank"><span data-t="compile_ready"></span></a>
+      <button class="ghost" onclick="api('/api/open',{path:cur.dir+'/out'})"><svg class="i"><use href="#folder"/></svg><span data-t="open_dir"></span></button></div>
+    <div class="tl" id="tl"></div>
+    <div class="res" id="res"></div>
+    <div class="hint mt16"><span data-t="captions_note"></span>. <span data-t="rate_note"></span></div>
+    <div class="after hide" id="after">
+      <div class="lbl" data-t="after_h"></div>
+      <div class="row">
+        <button id="cleanbtn" onclick="cleanup(cur.dir)"><svg class="i"><use href="#trash"/></svg><span id="cleanlbl"></span></button>
+        <span class="hint" data-t="clean_note"></span>
+      </div>
+      <div class="row mt12">
+        <button id="morebtn" onclick="more()"><svg class="i"><use href="#plus"/></svg><span data-t="more"></span></button>
+        <input type="number" id="moren" value="10" min="1" max="100" style="width:80px"><span class="hint" data-t="more_n"></span>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- ============ КАНАЛИ ============ -->
+<div id="p-channels" class="page hide">
+  <h1 data-t="w_h"></h1><p class="lead" data-t="w_note"></p>
+  <section>
+    <div class="sh"><div class="sp"></div><button class="ghost" id="wedit" onclick="toggleWEdit()"><svg class="i"><use href="#pencil"/></svg><span id="weditl" data-t="edit"></span></button></div>
+    <div class="wgrid" id="wl"></div>
+    <div class="row mt16 hide" id="wadd">
+      <input type="text" id="waddurl" data-tp="add_ph" style="flex:1">
+      <button onclick="wAdd()"><svg class="i"><use href="#plus"/></svg><span data-t="add_ch"></span></button>
+    </div>
+  </section>
+</div>
+
+<!-- ============ ЧЕРГА ============ -->
+<div id="p-queue" class="page hide">
+  <h1 data-t="q_h"></h1><p class="lead" data-t="q_note"></p>
+  <section>
+    <textarea id="qurls" rows="5" data-tp="ph_url"></textarea>
+    <div class="row mt12"><button class="pri" onclick="qAdd()"><svg class="i"><use href="#plus"/></svg><span data-t="q_add"></span></button></div>
+    <div class="lib mt16" id="ql"></div>
+  </section>
+</div>
+
+<!-- ============ БІБЛІОТЕКА ============ -->
+<div id="p-lib" class="page hide">
+  <h1 data-t="past"></h1>
+  <section><div class="lib" id="lib"></div></section>
+</div>
+
+<!-- ============ НАЛАШТУВАННЯ ============ -->
+<div id="p-set" class="page hide">
+  <h1 data-t="tab_set"></h1>
+  <section class="sets">
+    <div class="srow"><b data-t="s_lang"></b><div class="seg" id="slang"><button data-v="uk">Українська</button><button data-v="ru">Русский</button><button data-v="en">English</button></div></div>
+    <div class="srow"><b data-t="s_model"></b><select id="smodel" onchange="saveSet({model:this.value})"><option value="base" data-t="mdl_base"></option><option value="small" data-t="mdl_small"></option><option value="medium" data-t="mdl_medium"></option></select></div>
+    <div class="srow"><b data-t="s_gpu"></b><label class="tg"><input type="checkbox" id="sgpu" onchange="saveSet({gpu:this.checked})"><i></i><span class="tc" id="sgpun"></span></label></div>
+    <div class="srow"><div><b data-t="s_quiet"></b><div class="hint" data-t="s_quiet_d"></div></div><label class="tg"><input type="checkbox" id="squiet" onchange="saveSet({quiet:this.checked})"><i></i></label></div>
+    <div class="srow"><div><b data-t="s_disk"></b><div class="hint" id="sdiskd"></div></div><input type="number" id="sdisk" min="5" max="5000" style="width:100px" onchange="saveSet({disk_limit_gb:+this.value||null})"></div>
+    <div class="srow"><b data-t="s_hist"></b><label class="tg"><input type="checkbox" id="shist" onchange="saveSet({history:this.checked})"><i></i></label></div>
+    <div class="srow"><div><b data-t="s_phone"></b><div class="hint" data-t="s_phone_d"></div><div class="hint hide" id="sphr"><span data-t="s_phone_restart"></span> <button class="ghost" onclick="saveSet({lan:document.getElementById('sphone').checked,restart:true}).then(()=>{document.getElementById('supd').textContent=t('s_restarting');setTimeout(()=>location.reload(),9000)})" data-t="restart"></button></div></div>
+      <label class="tg"><input type="checkbox" id="sphone" onchange="phone(this.checked)"><i></i></label></div>
+    <div class="qr hide" id="qr"></div>
+    <div class="srow"><b data-t="s_notif"></b><button class="ghost" id="snotif" onclick="Notification.requestPermission().then(loadSet)" data-t="s_notif_btn"></button></div>
+    <div class="srow"><div><b data-t="s_upd"></b> <span class="tc" id="sver"></span><div class="hint" id="supd"></div></div>
+      <div class="row"><button class="ghost" onclick="updCheck()" data-t="s_upd_check"></button><button class="pri hide" id="supdgo" onclick="updGo()" data-t="s_upd_go"></button></div></div>
+    <div class="srow"><div><b data-t="s_hw"></b><div class="tc" id="shw"></div></div><button class="ghost" onclick="autoTune()" data-t="s_auto"></button></div>
+  </section>
+</div>
+</main>
+<script src="/ui/app.js"></script>
+</body>
+</html>
