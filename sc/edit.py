@@ -313,6 +313,7 @@ def _shot_quality(src, t, span):
     qs = [frame_quality(f) for f in fr]
     q = min(x["score"] for x in qs)
     if any(x["hard"] for x in qs): q = min(q, -5.0)  # титри/субтитри/темрява/порожнеча/змаз — ніколи
+    if sum(1 for x in qs if x["face"]) < 2: q -= 2.5  # людини майже нема в самому шоті (гра, предмети, стрибок не туди)
     ga = cv2.resize(cv2.cvtColor(fr[0], cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
     gb = cv2.resize(cv2.cvtColor(fr[2], cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
     mot = float(np.abs(ga - gb).mean())
@@ -344,7 +345,7 @@ def verify_shots(shots, vpool, src, off, job=None):
                 t = max(0.0, c["t"] - 0.15)
                 if any(abs(t - u) < gap for u in used): continue
                 if any(abs(t - nb["t"]) < 1.5 for nb in neigh): continue  # той самий момент двічі поспіль — ні
-                if not c.get("face") and gap > 0: continue  # на заміну — лише кадри з людиною
+                if not c.get("face") or c.get("fw", 1) < 0.04: continue  # на заміну — лише кадри з людиною
                 if t not in qc: qc[t] = _shot_quality(src, t - off, span); tried += 1
                 dup = sum(abs(t - u) < 1.0 for u in used)
                 qe = qc[t] - 1.3 * dup  # повтори — лише якщо справді краще
@@ -590,9 +591,10 @@ def frame_quality(img):
     cl = lambda v: min(1.0, max(0.0, v))
     sc = 0.0
     if in_crop:
-        sc += 2.4 + 0.8 * cl(fw / 0.06)              # людина в кадрі — головне в едіті (і на загальному плані теж)
+        sc += 2.4 * cl((fw - 0.03) / 0.05) + 0.8 * cl(fw / 0.08)  # людина в кадрі — головне (крихітне «обличчя» < 3 % — не рахується: часто це гра/екран)
         if fw > 0.42: sc -= 0.6                        # дуже великий план — гірше читається
         if fw > 0.7: sc -= 1.2                         # обличчя на весь екран — «непонятний» кадр
+    if colorful > 105: sc -= 2.5                       # «кислотна» картинка — гра, мультик, екран
     sb = _subs_score(img) if w0 >= 300 else 0.0
     if sb >= 3: sc -= 4.0                              # вшиті субтитри джерела
     sc += 0.9 * cl((ent - 4.6) / 2.4) + 0.8 * cl(edges / 0.07) + 0.6 * cl(colorful / 55) + 0.6 * cl((contrast - 22) / 38)
@@ -606,7 +608,7 @@ def frame_quality(img):
     sc -= 2.4 * min(tl, 3) + 30 * ta                 # вшиті написи/субтитри джерела в едіті — це сміття
     if sharp < 30: sc -= 1.5
     hard = dark > 0.45 or hot > 0.5 or tl >= 1 or ent < 4.3 or edges < 0.012 or sharp < 18 or sb >= 3
-    return {"hard": bool(hard), "score": sc, "face": bool(in_crop), "fs": round(fw * fw * ASPECT, 4) if in_crop else 0.0, "br": round(float(g.mean()) / 255, 3),
+    return {"hard": bool(hard), "score": sc, "face": bool(in_crop and fw >= 0.04), "fs": round(fw * fw * ASPECT, 4) if in_crop else 0.0, "br": round(float(g.mean()) / 255, 3),
             "sa": round(colorful / 40 - 1, 2), "txt": tl, "fw": round(fw, 3) if in_crop else 0.0, "dark": dark, "empty": ent < 4.3 or edges < 0.012}
 
 
@@ -1311,12 +1313,12 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
         cache = d / "vscan.json"
         try: vpool = _json.loads(cache.read_text()) if cache.exists() else None
         except Exception: vpool = None
-        if isinstance(vpool, dict) and vpool.get("v") == 8 and vpool.get("ar", "9:16") == ar_: vpool = vpool["items"]
+        if isinstance(vpool, dict) and vpool.get("v") == 9 and vpool.get("ar", "9:16") == ar_: vpool = vpool["items"]
         else:
             job.step("edit_scan", 60)
             vpool = scan_video(meta["video"], meta.get("duration") or 0, skip=(meta.get("info") or {}).get("skip") or [], job=job)
             job.log("edit_scanned", len(vpool))
-            cache.write_text(_json.dumps({"v": 8, "ar": ar_, "items": vpool}))
+            cache.write_text(_json.dumps({"v": 9, "ar": ar_, "items": vpool}))
         for v in vpool:  # моменти, де щось відбувається за звуком/чатом, — трохи вище
             if any(abs(v["t"] - c["peak"]) < 4 for c in pool if c.get("final", 0) > 0.5): v["score"] += 0.6
         if len(vpool) < 8: vpool = None
