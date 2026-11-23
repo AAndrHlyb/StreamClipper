@@ -401,17 +401,75 @@ def tr_spin(fr, q, sign=1):
     return cv2.addWeighted(out, 0.6, cv2.blur(out, (25, 25)), 0.4, 0) if q > 0.3 else out
 
 
+def slide_curve(j, n):
+    """Хід «наїзду» кадру: швидко на ~65 %, коротка пауза (два кадри видно разом), потім дотискає до кінця."""
+    x = (j + 1) / n
+    if x < 0.4: return 0.65 * ease_out(x / 0.4), 1.0
+    if x < 0.7: return 0.65 + 0.05 * (x - 0.4) / 0.3, 0.0
+    return 0.7 + 0.3 * ease_io((x - 0.7) / 0.3), 0.6
+
+
+def tr_slide(prev, fr, q, direction="up", vel=1.0):
+    """Новий кадр наїжджає на попередній з краю (частина одного кадру поверх іншого), край змазаний рухом,
+    під ним — тінь; старий кадр трохи відступає й темнішає."""
+    if prev is None: return fr
+    cv2 = _cv2()
+    q = min(1.0, max(0.0, q))
+    vert = direction in ("up", "down")
+    L = H if vert else W
+    off = int(round((1 - q) * L))
+    if off <= 0: return fr
+    sgn = 1 if direction in ("up", "left") else -1  # up: входить знизу
+    M = cv2.getRotationMatrix2D((W / 2, H / 2), 0, 1 + 0.04 * q)
+    old = cv2.warpAffine(prev, M, (W, H), borderMode=cv2.BORDER_REFLECT)
+    old = (old.astype(np.float32) * (1 - 0.35 * q)).astype(np.uint8)
+    new = fr
+    if vel > 0.05:
+        kz = int(9 + 70 * vel) | 1
+        new = cv2.blur(fr, (1, kz) if vert else (kz, 1))
+    out = old.copy()
+    sh = 26
+    if vert:
+        if sgn > 0:  # знизу вгору
+            out[off:] = new[:H - off]
+            if off - sh > 0: out[off - sh:off] = (out[off - sh:off] * np.linspace(1, 0.45, sh)[:, None, None]).astype(np.uint8)
+        else:
+            out[:H - off] = new[off:]
+            e = H - off
+            if e + sh < H: out[e:e + sh] = (out[e:e + sh] * np.linspace(0.45, 1, sh)[:, None, None]).astype(np.uint8)
+    else:
+        if sgn > 0:  # справа наліво
+            out[:, off:] = new[:, :W - off]
+        else:
+            out[:, :W - off] = new[:, off:]
+    return out
+
+
+def tr_splitin(prev, fr, q, vel=1.0):
+    """Дві половини нового кадру заїжджають з протилежних боків (верх — зліва, низ — справа)."""
+    if prev is None: return fr
+    cv2 = _cv2()
+    q = min(1.0, max(0.0, q)); off = int(round((1 - q) * W))
+    if off <= 0: return fr
+    new = cv2.blur(fr, (int(9 + 60 * vel) | 1, 1)) if vel > 0.05 else fr
+    out = (prev.astype(np.float32) * (1 - 0.3 * q)).astype(np.uint8)
+    hh = H // 2
+    out[:hh, :W - off] = new[:hh, off:]
+    out[hh:, off:] = new[hh:, :W - off]
+    return out
+
+
 # ------------------------------------------------------------------ стилі едіту (набір правил, з якого кожна генерація бере свій варіант)
 STYLES = {
-    "hype":    {"trans": ["zoom", "glitch", "whip", "spin"], "looks": ["outline", "echo", "mirror", "colorpop", None, None],
+    "hype":    {"trans": ["zoom", "glitch", "whip", "spin", "slide"], "looks": ["outline", "echo", "mirror", "colorpop", None, None],
                 "grade": ["punch", "warm"], "text": ["slam", "slam", "stack", "rgb", "behind", "deep", "pop", "rise"], "cutout": 0.35, "flash": 3},
-    "cinema":  {"trans": ["zoom", "iris", "whip"], "looks": ["letterbox", "bokeh", "spotlight", None, None],
+    "cinema":  {"trans": ["zoom", "iris", "whip", "slide"], "looks": ["letterbox", "bokeh", "spotlight", None, None],
                 "grade": ["warm", "cold"], "text": ["waterfall", "behind", "rise", "wipe", "split", "behind"], "cutout": 0.2, "flash": 1},
     "neon":    {"trans": ["glitch", "pixel", "zoom"], "looks": ["outline", "spotlight", "echo", "tunnel", None],
                 "grade": ["cold", "punch"], "text": ["rgb", "orbit", "behind", "slam", "deep", "rise"], "cutout": 0.3, "flash": 2},
-    "pop":     {"trans": ["whip", "shutter", "zoom", "iris"], "looks": ["colorpop", "popframe", "mirror", None, None],
+    "pop":     {"trans": ["whip", "shutter", "zoom", "iris", "slide", "splitin"], "looks": ["colorpop", "popframe", "mirror", None, None],
                 "grade": ["punch", "warm"], "text": ["stack", "pop", "deep", "slam", "orbit", "rise"], "cutout": 0.45, "flash": 2},
-    "noir":    {"trans": ["zoom", "shutter", "glitch"], "looks": ["bwred", "bwred", "spotlight", "bokeh", None],
+    "noir":    {"trans": ["zoom", "shutter", "glitch", "slide"], "looks": ["bwred", "bwred", "spotlight", "bokeh", None],
                 "grade": ["none"], "text": ["behind", "rise", "slam", "deep", "waterfall"], "cutout": 0.25, "flash": 2},
 }
 
@@ -421,7 +479,7 @@ STYLES = {
 # st (сила долі), d (тривалість), face (є обличчя), fs (розмір обличчя), fbr (яскравість кадру 0..1), fsa (насиченість, z)
 _ON = lambda c, *secs: 1.0 if c["sec"] in secs else 0.0
 LOOK_RULES = {
-    None:        lambda c: 0.55 + 0.6 * _ON(c, "intro", "resolve") + (0.5 if c["d"] < 0.35 else 0),
+    None:        lambda c: 1.25 + 0.6 * _ON(c, "intro", "resolve") + (0.5 if c["d"] < 0.35 else 0) - 0.5 * _ON(c, "drop"),  # чиста картинка — норма, образ — акцент
     "spotlight": lambda c: 0.8 * c["face"] + 0.5 * _ON(c, "build", "pre") + 0.3 * (1 - c["fbr"]),
     "colorpop":  lambda c: 0.7 * c["face"] + 0.4 * max(0.0, c["fsa"]) + 0.3 * _ON(c, "peak"),
     "bwred":     lambda c: 0.6 * c["face"] + 0.5 * (1 - c["br"]) + 0.3 * _ON(c, "pre", "drop"),
@@ -448,6 +506,8 @@ TRANS_RULES = {
     "pixel":   lambda c: 0.4 * c["br"] + 0.3 * _ON(c, "build"),
     "iris":    lambda c: 0.6 * _ON(c, "intro", "resolve", "build") + 0.3 * (1 - c["en"]),
     "shutter": lambda c: 0.5 * _ON(c, "build") + 0.3 * c["busy"],
+    "slide":   lambda c: 0.75 + 0.3 * _ON(c, "build", "peak") + 0.2 * (c["d"] >= 0.5),
+    "splitin": lambda c: 0.5 + 0.3 * _ON(c, "peak") + 0.2 * c["busy"],
     "dip":     lambda c: 0.9 * _ON(c, "intro", "resolve") * (1 - c["en"]) - 0.6 * _ON(c, "peak", "drop"),
 }
 HIT_RULES = {  # акцент на початку шоту на сильну долю

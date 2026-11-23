@@ -253,6 +253,7 @@ def _shot_quality(src, t, span):
     if a is None or b is None: return -9.0
     qa, qb = frame_quality(a), frame_quality(b)
     q = min(qa["score"], qb["score"])
+    if qa["hard"] or qb["hard"]: q = min(q, -5.0)  # титри/субтитри/темрява/порожнеча/змаз — ніколи
     ga = cv2.resize(cv2.cvtColor(a, cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
     gb = cv2.resize(cv2.cvtColor(b, cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
     mot = float(np.abs(ga - gb).mean())
@@ -265,7 +266,7 @@ def verify_shots(shots, vpool, src, off, job=None):
     """Кадри обирались за пробними кадрами; тут перевіряємо саме ті секунди, що підуть у ролик.
     Слабкий шот міняємо на наступного найкращого кандидата (теж перевіреного). -> скільки замінено"""
     scores = sorted(c["score"] for c in vpool)
-    thr = min(3.0, scores[int(len(scores) * 0.55)]) if scores else 0.0
+    thr = max(1.0, min(3.0, scores[int(len(scores) * 0.55)])) if scores else 1.0
     used = [sh["t"] for sh in shots]
     cands = sorted(vpool, key=lambda c: -c["score"])
     fixed = 0
@@ -475,12 +476,20 @@ def ease(x): x = min(1.0, max(0.0, x)); return 1 - (1 - x) ** 3
 
 
 # ------------------------------------------------------------------ аналіз картинки джерела
+_LOGOS = []  # боксы водяних знаків поточного джерела (частки кадру), ставить make_edit
+
+
 def frame_quality(img):
     """Чи гарний кадр для едіту — рахується по тій частині, що реально піде у вертикальний ролик (9:16, по обличчю).
     Штрафує: темряву/пересвіт, «порожні» кадри (стіна, підлога, розмитий шматок предмета), вшиті написи, змаз;
     дає бали: людина з обличчям середнього розміру, деталізація, контраст, колір. -> dict(score, face, fs, br, sa, ...)"""
     cv2 = _cv2()
     h0, w0 = img.shape[:2]
+    if _LOGOS:  # водяні знаки джерела — не «вшитий текст»: зафарбовуємо їх перед аналізом
+        img = img.copy()
+        for x, y, bw, bh in _LOGOS:
+            X0, Y0, X1, Y1 = int(x * w0), int(y * h0), int((x + bw) * w0) + 1, int((y + bh) * h0) + 1
+            img[Y0:Y1, X0:X1] = img[max(0, Y0 - 3):Y0 + 1, X0:X1].mean(axis=(0, 1)) if Y0 > 0 else 0
     fs = _faces_small(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), img)
     cw = min(w0, int(h0 * 9 / 16)); x0 = (w0 - cw) // 2
     big = max(fs, key=lambda f: f[2] * f[3]) if fs else None
@@ -513,7 +522,8 @@ def frame_quality(img):
     sc -= 1.5 if hot > 0.45 else 0
     sc -= 1.3 * min(tl, 3) + 25 * ta
     if sharp < 30: sc -= 1.5
-    return {"score": sc, "face": bool(in_crop), "fs": round(fw * fw * 9 / 16, 4) if in_crop else 0.0, "br": round(float(g.mean()) / 255, 3),
+    hard = dark > 0.45 or hot > 0.5 or tl >= 1 or ent < 4.3 or edges < 0.012 or sharp < 18
+    return {"hard": bool(hard), "score": sc, "face": bool(in_crop), "fs": round(fw * fw * 9 / 16, 4) if in_crop else 0.0, "br": round(float(g.mean()) / 255, 3),
             "sa": round(colorful / 40 - 1, 2), "txt": tl, "dark": dark, "empty": ent < 4.3 or edges < 0.012}
 
 
@@ -554,6 +564,7 @@ def scan_video(src, dur, skip=(), job=None):
         if any(a - 1 <= t <= b + 1 for a, b in skip): continue  # реклама
         q["t"] = t; q["score"] = float(q["score"])
         q.pop("dark", None); q.pop("empty", None)
+        if q.pop("hard", False): q["score"] -= 3.0
         out.append(q)
     return out
 
@@ -659,13 +670,13 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
         elif blk: fx = "cut"
         else: fx = FX.choose(FX.TRANS_RULES, c, rnd, style["trans"], used_tr, prev_sh["fx"] if prev_sh else None)
         hit = None
-        if i > 0 and not blk and (is_drop or (st >= thr and a > drop)) and hits_n < max_flash + 2:
+        if i > 0 and not blk and (is_drop or (st >= thr and a > drop)) and hits_n < max_flash + 1:
             hit = FX.choose(FX.HIT_RULES, c, rnd, ("flash",) if is_drop else (), used_hit, prev_sh.get("hit") if prev_sh else None)
             if hit == "flash" and flashes >= max_flash: hit = None
             if hit: hits_n += 1; flashes += hit == "flash"
         if hit == "flash": fx = "flash" if fx in ("cut", "none") else fx
         move = FX.choose(FX.MOVE_RULES, c, rnd, (), used_mv, prev_sh.get("move") if prev_sh else None, noise=0.5)
-        look = None if blk else FX.choose(FX.LOOK_RULES, c, rnd, style["looks"], used_look, prev_sh["look"] if prev_sh else None,
+        look = None if (blk or sum(used_look.values()) >= max(2, int(n * 0.35)) or (not is_drop and rnd.random() < 0.45)) else FX.choose(FX.LOOK_RULES, c, rnd, style["looks"], used_look, prev_sh["look"] if prev_sh else None,
                                          person_only=FX.PERSON_LOOKS)
         cut_in = (not blk and d >= 0.55 and i > 0 and fx in ("cut", "none", "zoom", "whip") and look not in ("sticker", "popframe", "thermal")
                   and c["face"] and rnd.random() < style.get("cutout", 0.3))
@@ -897,7 +908,7 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
             jx = (rc.setdefault(("wj", id(ev), n_), random.uniform(-30, 30)) * (1 - e_)) if n_ else 0
             blend(frame, spr, W / 2 + jx, cy + n_ * gap * e_, mask, pb, fade * q * (1.0, 0.55, 0.25)[n_])
     elif st == "neon":  # неоновий напис у темряві (пауза перед дропом)
-        sz = fit_size(txt, FONT_WIDE, W * 0.7, hi=170); spr = sprite(txt, sz, FONT_WIDE, acc)
+        sz = fit_size(txt, FONT_WIDE, W * 0.82, hi=230); spr = sprite(txt, sz, FONT_WIDE, acc)
         fl = 1.0 if dt > 0.16 else (0.25 if int(dt * 40) % 2 else 1.0)  # мерехтіння при ввімкненні
         blend(frame, glow(spr, acc, 26), W / 2, H * 0.45, None, False, fade * fl)
         blend(frame, glow(spr, acc, 10), W / 2, H * 0.45, None, False, fade * fl)
@@ -927,21 +938,22 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
 
 
 def style_events(ev, rnd, behind_ok, prefer=None):
-    pool = (["behind", "behind", "rise", "deep", "wide", "slam", "slam", "stack", "orbit", "pop", "split", "wipe", "side", "cascade", "rgb"] if behind_ok
-            else ["slam", "slam", "stack", "split", "wipe", "cascade", "rgb", "pop", "behind", "rise", "deep", "wide"])
-    last = []
+    """Як у монтажера: на весь едіт — ОДИН основний стиль тексту і один акцентний (для сильних моментів),
+    один акцентний колір + білий. Без «зоопарку» з 15 різних анімацій."""
+    pool = (["behind", "behind", "rise", "deep", "wide", "slam", "stack", "orbit", "pop", "split", "wipe", "cascade", "rgb"] if behind_ok
+            else ["slam", "stack", "split", "wipe", "cascade", "rgb", "pop", "behind", "rise", "deep", "wide"])
+    src = [x for x in (prefer or pool) if behind_ok or x not in ("orbit", "side")] or pool
+    main = rnd.choice([x for x in src if x not in ("orbit", "cascade", "pop", "side")] or src)
+    accent = rnd.choice([x for x in pool if x != main])
+    acc_col = ACCENTS[rnd.randrange(len(ACCENTS))]
     for k, e in enumerate(ev):
-        src = prefer if (prefer and rnd.random() < 0.65) else pool
-        if not behind_ok: src = [x for x in src if x not in ("orbit", "side")] or pool
-        opts = [x for x in src if x not in last[-2:]] or src
-        s = rnd.choice(opts)
+        s = accent if (k % 4 == 3 and rnd.random() < 0.7) else main
         if s in ("orbit", "cascade") and len(e["txt"]) > 9: s = "behind"
-        if len(e["txt"].split()) >= 2 and rnd.random() < 0.5: s = "waterfall"
-        if e.get("words"): s = "build"
         if s == "wide" and len(e["txt"]) > 8: s = "behind"
-        e["style"] = s; last.append(s)
-        e["color"] = ACCENTS[(k * 2 + rnd.randrange(2)) % len(ACCENTS)]
-        e["fill"] = (246, 246, 246) if rnd.random() < 0.65 else e["color"]
+        if e.get("words"): s = "build"
+        e["style"] = s
+        e["color"] = acc_col
+        e["fill"] = (246, 246, 246) if (s == main or rnd.random() < 0.5) else acc_col
     return ev
 
 
@@ -999,15 +1011,24 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     m = analyze_music(music, start, L)
     # ---- картинка джерела: найцікавіші кадри (обличчя, різкість, колір), без реклами
     vpool = None
+    global _LOGOS
+    logos = []
+    if o.get("edit_delogo", True) and meta.get("video"):
+        try:
+            logos = find_logos(meta["video"], meta.get("duration") or 60)
+            if logos: job.log("edit_delogo", len(logos))
+        except Exception:
+            logos = []
+    _LOGOS = list(logos)
     if meta.get("video"):
         cache = d / "vscan.json"
         try: vpool = _json.loads(cache.read_text()) if cache.exists() else None
         except Exception: vpool = None
-        if isinstance(vpool, dict) and vpool.get("v") == 4: vpool = vpool["items"]
+        if isinstance(vpool, dict) and vpool.get("v") == 5: vpool = vpool["items"]
         else:
             job.step("edit_scan", 60)
             vpool = scan_video(meta["video"], meta.get("duration") or 0, skip=(meta.get("info") or {}).get("skip") or [], job=job)
-            cache.write_text(_json.dumps({"v": 4, "items": vpool}))
+            cache.write_text(_json.dumps({"v": 5, "items": vpool}))
         for v in vpool:  # моменти, де щось відбувається за звуком/чатом, — трохи вище
             if any(abs(v["t"] - c["peak"]) < 4 for c in pool if c.get("final", 0) > 0.5): v["score"] += 0.6
         if len(vpool) < 8: vpool = None
@@ -1066,13 +1087,6 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
             srcs[k] = (*segment(d, meta, s0, c["peak"] + 6, f"e{k}_{int(s0)}", job, pad=1), s0)
         return srcs[k]
     cam = o.get("cam") if o.get("layout") == "cam" else None
-    logos = []
-    if o.get("edit_delogo", True) and meta.get("video"):
-        try:
-            logos = find_logos(meta["video"], meta.get("duration") or 60)
-            if logos: job.log("edit_delogo", len(logos))
-        except Exception:
-            logos = []
     job.step("edit_shots", 64)
     from .pipeline import _pmap
     done = [0]
@@ -1093,7 +1107,8 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     behind_ok = seg is not None and seg.net is not None
     ev = style_events(ev, rnd, behind_ok, style.get("text"))
     for e in ev:  # під час паузи перед дропом — неоновий напис у темряві
-        if any(sh.get("blackout") and sh["a"] - 0.05 <= e["t0"] < sh["b"] for sh in shots): e["style"] = "neon"; e.pop("words", None)
+        if any(sh.get("blackout") and sh["a"] - 0.05 <= e["t0"] < sh["b"] for sh in shots):
+            e["style"] = "neon"; e.pop("words", None); e["txt"] = " ".join(e["txt"].split()[:2])
     out = d / "out" / name
     eargs = ["-c:v", "libx264", "-preset", "medium", "-crf", "15", "-tune", "film", "-profile:v", "high", "-level", "4.2",
              "-maxrate", "30M", "-bufsize", "60M", "-pix_fmt", "yuv420p", "-x264-params", "aq-mode=3"]
@@ -1185,6 +1200,14 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 if prev is not None and fx == "iris" and j < 6: fr = safe("iris", lambda: FX.tr_iris(prev, fr, (j + 1) / 6), fr)
                 if fx == "dip" and j < 7: fr = (fr * ((j + 1) / 8)).astype(np.uint8)
                 if nfx == "dip" and tail < 5: fr = (fr * ((tail + 1) / 6)).astype(np.uint8)
+                if prev is not None and fx in ("slide", "splitin"):
+                    K = max(6, min(12, int(pr["n"] * 0.45)))
+                    if j < K:
+                        if "sdir" not in sst: sst["sdir"] = rnd.choice(["up", "up", "down", "left", "right"]); sst["old"] = prev.copy()
+                        prev_out = sst["old"]
+                        qv, vel = FX.slide_curve(j, K)
+                        if fx == "slide": fr = safe("slide", lambda: FX.tr_slide(prev_out, fr, qv, sst["sdir"], vel), fr)
+                        else: fr = safe("splitin", lambda: FX.tr_splitin(prev_out, fr, qv, vel), fr)
                 if prev is not None and fx == "shutter" and j < 6: fr = safe("shutter", lambda: FX.tr_shutter(prev, fr, (j + 1) / 6), fr)
                 if leak is not None:
                     a = 0.32 * (0.5 + 0.5 * math.sin(t * 3 + i))
