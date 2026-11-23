@@ -774,14 +774,32 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
     beats = [b for b in m["beats"] if 0.05 < b < L - 0.15]
     drop = m["drop"] or (L * 0.45)
     resolve = L - 1.2
+    # ---- ритм як у монтажера: такти по 4 долі, на кожен такт — свій малюнок склейок (у долях).
+    # вступ — довгі кадри, розгін — 2+2 / 2+1+1, перед дропом — прискорення, кульмінація — чергування
+    # «серій» (по пів долі) і «затримок» (2 долі), щоб не було монотонного «кадр на кожну долю»
+    P = m.get("period") or 0.5
+    allb = m["beats"]; strs = m["strength"] or [0.5] * len(allb)
+    ph = max(range(4), key=lambda p: sum(strs[i] for i in range(p, len(allb), 4))) if allb else 0
+    downs = [allb[i] for i in range(ph, len(allb), 4)]
+    if not downs or downs[0] > 0.05: downs = [d_ - 4 * P for d_ in downs[:1]] + downs if downs else [0.0]
     cuts = [0.0]
-    for b in beats:
-        i = m["beats"].index(b); e = m["energy"][i]
-        if b >= resolve: break
-        if b < min(drop, L * 0.25): need = 0.9          # вступ: дихаємо
-        elif b < drop: need = 0.55 if e < 0.7 else 0.42  # розгін
-        else: need = 0.27 if e > 0.55 else 0.45          # кульмінація
-        if b - cuts[-1] >= need - 0.03 or b - cuts[-1] > 1.6: cuts.append(b)
+    for k_, bs in enumerate(downs):
+        if bs >= resolve: break
+        nxt_bar = downs[k_ + 1] if k_ + 1 < len(downs) else bs + 4 * P
+        if bs < min(drop, L * 0.25): pats = [[4], [2, 2], [2, 2]]
+        elif nxt_bar > drop - 0.05 and bs < drop - 0.05: pats = [[2, 1, 0.5, 0.5], [1, 1, 1, 0.5, 0.5]]   # розгін у дроп
+        elif bs < drop: pats = [[2, 2], [2, 1, 1], [1, 1, 2], [2, 2]]
+        else:
+            e = m["energy"][min(range(len(allb)), key=lambda i: abs(allb[i] - bs))] if allb else 0.7
+            pats = ([[1, 1, 1, 1], [1, 0.5, 0.5, 1, 1], [0.5, 0.5, 0.5, 0.5, 2], [1, 1, 2], [2, 1, 1], [1, 1, 0.5, 0.5, 1]]
+                    if e > 0.5 else [[2, 2], [2, 1, 1], [1, 1, 2]])
+        pat = rnd.choice(pats); t_ = bs
+        for u in pat:
+            t_ += u * P
+            if 0.18 < t_ - cuts[-1] and t_ < resolve and t_ < L - 0.15: cuts.append(round(t_, 3))
+    if drop and all(abs(c - drop) > 0.12 for c in cuts) and 0.3 < drop < resolve:  # склейка точно на дроп
+        cuts.append(drop); cuts.sort()
+        cuts = [c for k_, c in enumerate(cuts) if k_ == 0 or c - cuts[k_ - 1] > 0.15]
     if L - cuts[-1] > 1.8:  # фінальний кадр не висить 2–3 с: ще одна склейка на долю ближче до кінця
         late = [b for b in beats if cuts[-1] + 0.5 < b < L - 0.9]
         if late: cuts.append(min(late, key=lambda b: abs(b - (L - 1.2))))
@@ -800,6 +818,7 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
             for c in sorted(pool_, key=lambda x: -x["score"]):  # спершу різні сцени з кращої половини, потім м'якше
                 if len(picks) >= n: break
                 if c in picks: continue
+                if not c.get("face") and sum(1 for p in picks if not p.get("face")) >= max(1, int(n * 0.15)) and thr_d: continue
                 if all(abs(c["t"] - p["t"]) > gap and _sig_d(c.get("sig"), p.get("sig")) > thr_d for p in picks): picks.append(c)
             if len(picks) >= n: break
         while len(picks) < n: picks.append(rnd.choice(good[:max(3, len(good) // 2)]))
@@ -831,8 +850,11 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
         is_drop = abs(a - drop) < 0.2 or (i > 0 and cuts[i - 1] < drop <= a)
         before_drop = i + 1 < n and cuts[i + 1] <= drop < cuts[i + 1] + 0.2
         # швидкість: перед дропом — сповільнення, що «приземляється» на удар; у кульмінації — інколи прискорення
-        if before_drop and d >= 0.4: speed, ramp = 1.6, "in"
+        flurry = d < P * 0.6
+        if flurry: speed, ramp = 1.0, "none"
+        elif before_drop and d >= 0.4: speed, ramp = 1.6, "in"
         elif is_drop: speed, ramp = 1.0, "none"
+        elif a > drop and d >= 0.35 and rnd.random() < 0.15: speed, ramp = 1.0, "stutter"
         elif a > drop and d >= 0.5 and rnd.random() < 0.35: speed, ramp = 1.7, rnd.choice(["in", "out"])
         else: speed, ramp = (0.85 if a < drop else 1.15), "none"
         # ---- «режисер»: контекст шоту → найкращий перехід, образ і акцент
@@ -851,7 +873,9 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
         elif blk: fx = "cut"
         else: fx = FX.choose(FX.TRANS_RULES, c, rnd, style["trans"], used_tr, prev_sh["fx"] if prev_sh else None)
         hit = None
-        if i > 0 and not blk and (is_drop or (st >= thr and a > drop)) and hits_n < max_flash + 1:
+        on_down = any(abs(a - d_) < 0.08 for d_ in downs)
+        if i > 0 and not blk and (is_drop or (st >= thr and a > drop) or (flurry and rnd.random() < 0.6)
+                                  or (on_down and a > drop and rnd.random() < 0.5)) and hits_n < max_flash + 5:
             hit = FX.choose(FX.HIT_RULES, c, rnd, ("flash",) if is_drop else (), used_hit, prev_sh.get("hit") if prev_sh else None)
             if hit == "flash" and flashes >= max_flash: hit = None
             if hit: hits_n += 1; flashes += hit == "flash"
@@ -863,12 +887,15 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
                   and c["face"] and rnd.random() < style.get("cutout", 0.3))
         if video_pool:
             k, t = -1, max(0.0, picks[i]["t"] - 0.15)
+            if flurry and shots and (shots[-1].get("flurry") or rnd.random() < 0.5) and shots[-1]["k"] == -1:
+                pv = shots[-1]  # серія джамп-катів у тій самій сцені: кожна склейка — стрибок уперед
+                t = pv["t"] + (pv["b"] - pv["a"]) * pv["speed"] + 0.3
         else:
             ranked = sorted(range(len(pool)), key=lambda j: -pool[j].get("final", 0))
             k = ranked[(0 if is_drop else i) % len(ranked)]; t = pool[k]["peak"] + rnd.uniform(-3, 2)
         shots.append({"a": a, "b": b, "k": k, "t": t, "speed": speed, "ramp": ramp, "hard": st >= thr, "drop": is_drop,
                       "fx": fx, "resolve": a >= resolve - 0.01, "look": look, "cutin": cut_in, "dir": rnd.choice([-1, 1]),
-                      "hit": hit, "blackout": blk, "sec": sec, "move": move})
+                      "hit": hit, "blackout": blk, "sec": sec, "move": move, "flurry": flurry})
     return shots
 
 
@@ -908,6 +935,8 @@ def render_shot(src, t, sh, o, job, out, cam=None, logos=None):
 def ramp_index(j, n, nsrc, kind):
     """Велосіті: швидко → повільно (in) або повільно → швидко (out)."""
     x = j / max(1, n - 1)
+    if kind == "stutter":  # «заїкання»: кадр тримається 3 кадри і стрибає — класика едітів
+        return min(nsrc - 1, int(round((j - j % 3) / max(1, n - 1) * (nsrc - 1))))
     if kind == "in": y = 1 - (1 - x) ** 2.6
     elif kind == "out": y = x ** 2.6
     else: y = x
