@@ -1132,6 +1132,25 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
             ssz = fit_size(" ".join(small), FONT_WIDE_M, W * 0.62, hi=64)
             ss = sprite(" ".join(small), ssz, FONT_WIDE_M, white)
             blend(frame, ss, W / 2, by + spr.shape[0] * 0.5 * sc_ + ss.shape[0] * 0.6 + 26 * (1 - q), None, False, fade * q)
+    elif st == "kinetic":  # як у референсі: слова ВЕЛИКО по двоє (лівий/правий слот), кожне своїм кольором,
+        # нове слово вискакує з перельотом на місце попереднього в тому ж слоті; наприкінці фраза вилітає вбік
+        words = ev.get("words") or [(w, ev["t0"]) for w in txt.split()]
+        cols = [(200, 40, 255), (255, 120, 20), (246, 246, 246), (60, 230, 255)]  # BGR: рожевий, синій, білий, жовтий
+        slots = {}
+        for n_, (w, tw) in enumerate(words):
+            if tw <= t + 1e-3: slots[n_ % 2] = (n_, w, tw)
+        out_q = max(0.0, (t - (ev["t1"] - 0.14)) / 0.14)  # виліт
+        ky = cy if person else H * 0.4
+        for sl, (n_, w, tw) in slots.items():
+            wt = w.upper()
+            sz = fit_size(wt, FONT_BIG, W * 0.46, hi=330)
+            spr = sprite(wt, sz, FONT_BIG, cols[n_ % len(cols)])
+            q = min(1.0, (t - tw) / 0.12)
+            sc_ = (1.28 - 0.28 * back_ease(q)) * (1 + 0.05 * beat_pulse)
+            x = W * (0.27 if sl == 0 else 0.73) - out_q * W * 1.1
+            y = ky + 22 * (1 - q) * (1 if sl else -1)
+            blend(frame, warp(glow(spr, cols[n_ % len(cols)], 12), sc_), x, y, None, False, 0.3 * fade)
+            blend(frame, warp(spr, sc_), x, y, None, False, fade * min(1.0, q * 3))
     elif st == "line":  # фраза будується зліва направо, слово за словом (як «SHE AIN'T INTO NO DRAMA» у референсі)
         words = ev.get("words") or [(w, ev["t0"]) for w in txt.split()]
         f = FONT_WIDE
@@ -1212,7 +1231,8 @@ def style_events(ev, rnd, behind_ok, prefer=None):
         if s in ("orbit", "cascade") and len(e["txt"]) > 9: s = "behind"
         if s == "wide" and len(e["txt"]) > 8: s = "behind"
         if e.get("words"):
-            s = "line" if (len(e["words"]) >= 3 or len(e["txt"]) > 12 or rnd.random() < 0.5) else "build"
+            r_ = rnd.random()
+            s = "kinetic" if r_ < 0.6 else ("line" if (r_ < 0.85 or len(e["words"]) >= 3) else "build")
         if e.get("brand"): s = "brand"
         if e.get("hero"):  # ключове слово — великим «авторським» стилем, по черзі
             s = ("behind", "rise", "deep", "slam", "wide")[k % 5] if behind_ok else ("slam", "deep", "rgb", "wide")[k % 4]
@@ -1433,7 +1453,7 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
             if seg: seg.reset()
             nxt = shots[i + 1] if i + 1 < len(shots) else None
             leak = leak_layer(rnd) if rnd.random() < 0.2 else None
-            sst = {}; ev_acc = ACCENTS[i % len(ACCENTS)]
+            sst = {"prev_bg": prev}; ev_acc = ACCENTS[i % len(ACCENTS)]
             cur_idx, cur = -1, None
             for j in range(pr["n"]):
                 want = ramp_index(j, pr["n"], pr["nsrc"], sh["ramp"]) if sh["ramp"] != "none" else j
@@ -1477,7 +1497,11 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 if fx == "whip" and j < 4:                # вхід: справа, гальмує
                     q = 1 - j / 4; dx += W * 0.22 * q ** 2.2; hblur = max(hblur, int(30 + 70 * q))
                 if fx == "flash" and j < 4: z *= 1 + 0.12 * (1 - j / 4)
-                fr = safe("zoom", lambda: zoom_frame(fr, z, ang, dx, dy), fr)
+                zc = (None, None)
+                if nfx == "crash" and tail < 6:  # «крешзум»: камера влітає в обличчя/темну точку — і звідти наступний кадр
+                    q = (6 - tail) / 6; z *= 1 + 3.2 * q ** 2.4; blur = max(blur, 0.14 * q)
+                    if last_head is not None: zc = (last_head["x"], last_head["cy"] + 40)
+                fr = safe("zoom", lambda: zoom_frame(fr, z, ang, dx, dy, zc[0], zc[1]), fr)
                 if cam_prev is not None and j > 0 and not hblur:  # змаз руху від швидкості камери
                     vx, vy = dx - cam_prev[0], dy - cam_prev[1]
                     vz = (z - cam_prev[2]) * W * 0.5
@@ -1498,13 +1522,13 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 if prev is not None and fx == "iris" and j < 6: fr = safe("iris", lambda: FX.tr_iris(prev, fr, (j + 1) / 6), fr)
                 if fx == "dip" and j < 7: fr = (fr * ((j + 1) / 8)).astype(np.uint8)
                 if nfx == "dip" and tail < 5: fr = (fr * ((tail + 1) / 6)).astype(np.uint8)
-                if prev is not None and fx in ("slide", "splitin", "strips"):
+                if prev is not None and fx in ("slide", "splitin", "strips", "crash"):
                     K = max(6, min(12, int(pr["n"] * 0.45)))
                     if j < K:
-                        if "sdir" not in sst: sst["sdir"] = rnd.choice(["up", "up", "down", "left", "right"]); sst["old"] = prev.copy()
+                        if "sdir" not in sst: sst["sdir"] = "up" if fx == "crash" else rnd.choice(["up", "up", "down", "left", "right"]); sst["old"] = prev.copy()
                         prev_out = sst["old"]
                         qv, vel = FX.slide_curve(j, K)
-                        if fx == "slide": fr = safe("slide", lambda: FX.tr_slide(prev_out, fr, qv, sst["sdir"], vel), fr)
+                        if fx in ("slide", "crash"): fr = safe("slide", lambda: FX.tr_slide(prev_out, fr, qv, sst["sdir"], vel), fr)
                         elif fx == "strips":
                             if "shz" not in sst: sst["shz"] = rnd.random() < 0.6
                             fr = safe("strips", lambda: FX.tr_strips(prev_out, fr, qv, vel, 3, sst["shz"]), fr)
@@ -1526,6 +1550,8 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                         col = (255, 255, 255) if i % 2 else ev_acc
                         fr = safe("silhouette", lambda: FX.hit_silhouette(fr, mask, q, col), fr)
                     elif sh["hit"] == "invert": fr = safe("invert", lambda: FX.hit_invert(fr, q * 0.9), fr)
+                if sh.get("hit") == "streak" and j < 5:
+                    fr = safe("streak", lambda: FX.hit_streak(fr, (1.0, 0.8, 0.55, 0.3, 0.12)[j], ev_acc, i), fr)
                 if sh.get("hit") == "chroma" and j < 4:
                     fr = safe("chroma", lambda: FX.hit_chroma(fr, (1.0, 0.7, 0.4, 0.15)[j]), fr)
                 if sh.get("blackout"):

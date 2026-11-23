@@ -653,3 +653,57 @@ LOOKS["parallax"] = look_parallax
 PERSON_LOOKS.add("parallax")
 LOOK_RULES["parallax"] = lambda c: (1.1 if c["face"] else -2) * (0.8 if c["sec"] in ("intro", "build", "resolve") else 0.35) + 0.3 * (c["d"] >= 0.8)
 
+
+# ------------------------------------------------------------------ з референсу: людина в чужій сцені, людина в темряві, світлові смуги
+def look_transfer(fr, m, head, lt, d, st, acc):
+    """Людина з нового кадру «вклеєна» у попередню сцену (колаж, як у референсі): ~0.35 с, з білим обідком,
+    потім — звичайний кадр."""
+    cv2 = _cv2()
+    bg = st.get("prev_bg")
+    if m is None or bg is None or lt > 0.4: return fr
+    M = full_mask(m)
+    edge = cv2.GaussianBlur(M[..., 0], (0, 0), 6)[..., None]
+    rim = np.clip(edge - M, 0, 1) * 1.8
+    b = cv2.GaussianBlur(bg, (0, 0), 3).astype(np.float32) * 0.85
+    out = b * (1 - M) + fr.astype(np.float32) * M + 255 * rim
+    k = 1.0 if lt < 0.3 else 1 - (lt - 0.3) / 0.1
+    return np.clip(out * k + fr.astype(np.float32) * (1 - k), 0, 255).astype(np.uint8)
+
+
+def look_isolate(fr, m, head, lt, d, st, acc):
+    """Людина в темряві: фон іде майже в чорне, по контуру — кольорове світло (rim light)."""
+    cv2 = _cv2()
+    if m is None: return fr
+    M = full_mask(m)
+    k = ease_out(min(1.0, lt / 0.12))
+    g = cv2.GaussianBlur(M[..., 0], (0, 0), 14)[..., None]
+    rim = np.clip(g - M, 0, 1) * np.array(acc, np.float32)[None, None, :] * 2.4
+    out = fr.astype(np.float32) * (M + (1 - M) * (1 - 0.88 * k)) + rim * k
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def hit_streak(fr, q, acc, seed=0):
+    """Світлові смуги (анаморфні відблиски) через кадр на ударі, гаснуть за кілька кадрів."""
+    cv2 = _cv2()
+    if q <= 0: return fr
+    r = np.random.RandomState(seed)
+    layer = np.zeros((H // 4, W // 4, 3), np.float32)
+    for _ in range(r.randint(2, 5)):
+        y = r.randint(H // 16, H // 4 - H // 16); th = r.randint(1, 3)
+        col = np.array(acc if r.rand() < 0.6 else (255, 255, 255), np.float32)
+        layer[y:y + th, :] = col
+    layer = cv2.GaussianBlur(layer, (0, 0), sigmaX=2, sigmaY=1.2) * 2.2 + cv2.GaussianBlur(layer, (0, 0), sigmaX=20, sigmaY=6) * 3.0
+    layer = cv2.resize(layer, (W, H), interpolation=cv2.INTER_LINEAR)
+    return np.clip(fr.astype(np.float32) + layer * q, 0, 255).astype(np.uint8)
+
+
+LOOKS["transfer"] = look_transfer
+LOOKS["isolate"] = look_isolate
+PERSON_LOOKS.update({"transfer", "isolate"})
+LOOK_RULES["transfer"] = lambda c: (1.0 if c["face"] else -2) * (0.9 if c["sec"] in ("build", "peak", "drop") else 0.3) + 0.2 * c["busy"]
+LOOK_RULES["isolate"] = lambda c: (0.9 if c["face"] else -2) * (0.8 if c["sec"] in ("pre", "drop", "peak") else 0.3) + 0.3 * (1 - c["fbr"])
+HIT_RULES["streak"] = lambda c: 0.5 + 0.4 * c["br"] + 0.3 * _ON(c, "drop", "peak")
+TRANS_RULES["crash"] = lambda c: 0.55 + 0.6 * _ON(c, "drop") + 0.3 * _ON(c, "peak") + 0.2 * c["st"]
+for _s in STYLES.values():
+    if "crash" not in _s["trans"]: _s["trans"].append("crash")
+
