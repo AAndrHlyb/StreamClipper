@@ -1,7 +1,7 @@
 // StreamClipper UI. Стан: P (перевірене посилання), CH (канал), cur (поточна задача).
 const UIV='2.8.0';const $=id=>document.getElementById(id);
 let THFAIL=false,LANG='uk',SET={},P=null,CH=null,cur={},img=null,cam=[0,0,.25,.25],poll=null,WEDIT=false,WLIST=[],NOTIFIED={};
-const st={etm:'lyrics',egrade:'auto',estyle:'auto',sspeed:'auto',mode:'best',layout:'blur',per:'30',typ:'archive',sp:'classic',ss:'m',spos:'auto',sw:'3',slang:'uk'};
+const st={etm:'lyrics',egrade:'auto',estyle:'auto',ear:'4:3',sspeed:'auto',mode:'best',layout:'blur',per:'30',typ:'archive',sp:'classic',ss:'m',spos:'auto',sw:'3',slang:'uk'};
 const t=(k,...a)=>{let s=(I18N[LANG]||I18N.uk)[k];if(s===undefined)s=I18N.uk[k]??k;return s.replace(/\{(\d)\}/g,(_,i)=>a[i]??'')};
 const ic=n=>`<svg class="i"><use href="#${n}"/></svg>`;
 async function api(u,b){const r=await fetch(u,b===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(!r.ok||j.error)throw new Error(t(j.error)||j.error||r.status);return j}
@@ -30,7 +30,7 @@ seg('mode','mode',()=>{CNT[PREVM]=+$('cnt').value;$('cnt').value=CNT[st.mode];PR
 seg('layout','layout',()=>{draw();plan();hintF()});
 seg('per','per',listVids);seg('typ','typ',listVids);
 ['sp','ss','spos','sw'].forEach(id=>seg(id,id,draw));
-seg('etm','etm',()=>{$('etext').classList.toggle('hide',st.etm!=='custom');plan()});seg('egrade','egrade');seg('estyle','estyle');
+seg('etm','etm',()=>{$('etext').classList.toggle('hide',st.etm!=='custom');plan()});seg('egrade','egrade');seg('estyle','estyle');seg('ear','ear');
 seg('sspeed','sspeed',async()=>{await saveSet({speed:st.sspeed});loadSet()});
 seg('slang','slang',async()=>{LANG=st.slang;applyI18n();await saveSet({lang:LANG})});
 ['mn','mx','cnt','subs','model','livem','scaps','sfont','emstart'].forEach(i=>$(i).addEventListener('input',()=>{plan();draw()}));
@@ -85,7 +85,7 @@ function showPreview(r){
   $('x_speech').checked=po.speech_filter!==false;$('x_hist').checked=po.history??!!SET.history;
   $('profbtn').classList.toggle('hide',!i.uploader);
   if(prof.opts){$('tn').textContent=t('prof_applied');$('tn').classList.remove('hide')}
-  ['mode','layout','sp','ss','spos','sw','etm','egrade','estyle'].forEach(k=>mark(k,k));modeUI();xcount();plan();img=null;draw();loadFrame(true);
+  ['mode','layout','sp','ss','spos','sw','etm','egrade','estyle','ear'].forEach(k=>mark(k,k));modeUI();xcount();plan();img=null;draw();loadFrame(true);
   $('s2').scrollIntoView({behavior:'smooth',block:'start'});
 }
 function opts(){const kw=$('x_kw').checked?$('kw').value:'';
@@ -95,7 +95,7 @@ function opts(){const kw=$('x_kw').checked?$('kw').value:'';
   censor:$('x_censor').checked,censor_mode:$('x_censor_mode').value,hook:$('x_hook').checked,zoom:$('x_zoom').checked,watermark:$('x_wm').checked,
   cover:$('x_cover').checked,denoise:$('x_denoise').checked,compile_min:st.mode==='compile'?Math.max(1,+$('cnt').value||8):8,teaser_sec:st.mode==='teaser'?Math.min(90,Math.max(10,+$('cnt').value||30)):30,
   edit_sec:st.mode==='edit'?Math.min(60,Math.max(5,+$('cnt').value||15)):15,music:EM?EM.path:null,music_start:$('emstart').value===''?null:+$('emstart').value,edit_textmode:st.etm,edit_text:$('etext').value,
-  edit_grade:st.egrade,edit_style:st.estyle,nick:$('enick').value.trim(),edit_behind:$('ebehind').checked,edit_delogo:$('edelogo').checked,edit_mute:$('emute').checked,vclips:$('x_vclips').checked,history:$('x_hist').checked,
+  edit_grade:st.egrade,edit_style:st.estyle,edit_ar:st.ear,nick:$('enick').value.trim(),edit_behind:$('ebehind').checked,edit_delogo:$('edelogo').checked,edit_mute:$('emute').checked,vclips:$('x_vclips').checked,history:$('x_hist').checked,
   gpu:$('x_gpu').checked,keywords:kw,sub_style:{preset:st.sp,size:st.ss,pos:st.spos,words:+st.sw,caps:$('scaps').checked,font:$('sfont').value}}}
 function plan(){if(!P)return;const i=P.info,o=opts(),live=['live','live_vod'].includes(i.kind);
   const dur=live?(o.live_minutes||120)*60+(i.duration||0):(i.duration||0),avg=(o.min_len+o.max_len)/2;let n,L=[],mb=0,min=0;const sp={base:.06,small:.13,medium:.35}[o.model]||.13;
@@ -223,7 +223,7 @@ $('emusic').addEventListener('change',async e=>{const f=e.target.files[0];if(!f)
     if(r.status===404)throw new Error(t('restart_need'));const j=await r.json().catch(()=>({error:'bad_audio'}));if(!r.ok||j.error)throw new Error(t(j.error)||j.error);
     EM=j;$('emname').textContent=`${j.name} · ${hms(j.dur)}`;$('emstart').max=Math.max(0,Math.floor(j.dur-5));plan()}catch(err){$('emname').textContent=err.message;EM=null}});
 async function reEdit(){if(!cur.dir)return;const r=await api('/api/reedit',{dir:cur.dir});$('s3').classList.remove('hide');$('jerr').textContent='';track(r.job)}
-function showComp(p,d,vert,kind){$('s4').classList.remove('hide');$('compbox').classList.remove('hide');$('compbox').classList.toggle('vert',!!vert);$('compn').textContent=t(kind==='edit'?'m_edit':vert?'m_teaser':'m_compile');$('compmore').classList.toggle('hide',kind!=='edit');if($('compv').dataset.p!==p){$('compv').dataset.p=p;$('compv').src=fileUrl(p)}
+function showComp(p,d,vert,kind){$('s4').classList.remove('hide');$('compbox').classList.remove('hide');$('compbox').classList.toggle('vert',!!vert);$('compn').textContent=t(kind==='edit'?'m_edit':vert?'m_teaser':'m_compile');$('compmore').classList.toggle('hide',kind!=='edit');$('compv').onloadedmetadata=()=>{const v=$('compv');$('compbox').classList.toggle('vert',v.videoHeight>v.videoWidth);v.style.aspectRatio=v.videoWidth+'/'+v.videoHeight};if($('compv').dataset.p!==p){$('compv').dataset.p=p;$('compv').src=fileUrl(p)}
   $('compd').textContent=d?hms(d):'';$('compdl').href=fileUrl(p,1)}
 async function rate(dir,r,good,rs,total){await api('/api/rate',{dir,n:r.n,good});r.rated=good?1:-1;renderRes(rs,dir,total)}
 function showAfter(j){const b=j.extra.sources_bytes||0;$('after').classList.remove('hide');$('cleanlbl').textContent=t('clean',gb(b));$('cleanbtn').disabled=!b;$('morebtn').disabled=!b}

@@ -15,6 +15,16 @@ from .core import src_fps
 from . import edit_fx as FX
 
 W, H, FPS = 1080, 1920, 30
+ASPECT = W / H
+AR_SIZES = {"9:16": (1080, 1920), "4:3": (1440, 1080), "16:9": (1920, 1080), "4:5": (1080, 1350)}
+
+
+def set_ar(ar):
+    """Формат ролика: 9:16 (TikTok), 4:3 (як у референсах), 16:9, 4:5. Міняє розміри для всіх ефектів."""
+    global W, H, ASPECT
+    W, H = AR_SIZES.get(ar or "", AR_SIZES["9:16"]); ASPECT = W / H
+    FX.W, FX.H = W, H
+    FX._VIG.clear(); FX._BULGE.clear()
 FONT_BIG = APP_DIR / "fonts" / "Anton-Regular.ttf"
 FONT_BOLD = APP_DIR / "fonts" / "Montserrat-ExtraBold.ttf"
 FONT_CYR = APP_DIR / "fonts" / "Oswald-Bold.ttf"
@@ -202,12 +212,18 @@ def text_events(m, o, L, rnd, words=None):
     beats = m["beats"]; ev = []
     snap = lambda t: min(beats, key=lambda b: abs(b - t)) if beats and min(abs(b - t) for b in beats) < 0.12 else t
     if words:
+        # фрази, як співаються: слова підряд (пауза < 0.4 с) до ~5 слів / 22 символів → одна подія,
+        # кожне слово з'являється у свій момент (стиль line/build), а не «слово-на-весь-екран» щодолі
         i = 0
         while i < len(words):
             grp = [words[i]]
-            if i + 1 < len(words) and len(words[i]["w"]) + len(words[i + 1]["w"]) <= 9 and words[i + 1]["s"] - words[i]["e"] < 0.15:
-                grp.append(words[i + 1])
-            t0 = snap(grp[0]["s"]); ev.append({"t0": t0, "t1": 0, "txt": " ".join(g["w"] for g in grp)}); i += len(grp)
+            while (i + len(grp) < len(words) and len(grp) < 5 and words[i + len(grp)]["s"] - grp[-1]["e"] < 0.4
+                   and sum(len(g["w"]) + 1 for g in grp) + len(words[i + len(grp)]["w"]) <= 22):
+                grp.append(words[i + len(grp)])
+            t0 = snap(grp[0]["s"])
+            e = {"t0": t0, "t1": 0, "txt": " ".join(g["w"] for g in grp)}
+            if len(grp) > 1: e["words"] = [(g["w"], max(t0, g["s"])) for g in grp]; e["sung"] = True
+            ev.append(e); i += len(grp)
     else:
         toks = [t for t in (o.get("edit_text") or "").replace("\n", " ").split(" ") if t.strip()]
         if not toks: return []
@@ -220,9 +236,9 @@ def text_events(m, o, L, rnd, words=None):
     out, k = [], 0
     while k < len(ev):
         grp = [ev[k]]
-        if rnd.random() < 0.38:
+        if not ev[k].get("words") and rnd.random() < 0.38:
             while (k + len(grp) < len(ev) and len(grp) < 3 and ev[k + len(grp)]["t0"] - grp[-1]["t0"] < 0.7
-                   and sum(len(g["txt"]) for g in grp) + len(ev[k + len(grp)]["txt"]) <= 15):
+                   and not ev[k + len(grp)].get("words") and sum(len(g["txt"]) for g in grp) + len(ev[k + len(grp)]["txt"]) <= 15):
                 grp.append(ev[k + len(grp)])
         if len(grp) > 1:
             ws = [(w, g["t0"]) for g in grp for w in g["txt"].split()]
@@ -232,7 +248,8 @@ def text_events(m, o, L, rnd, words=None):
     ev = out
     for k, e in enumerate(ev):
         nxt = ev[k + 1]["t0"] if k + 1 < len(ev) else L
-        e["t1"] = min(nxt, e["t0"] + (2.0 if e.get("words") else 1.3), L)
+        last = e["words"][-1][1] if e.get("words") else e["t0"]
+        e["t1"] = min(nxt, max(e["t0"] + 1.0, last + 0.7) if e.get("words") else e["t0"] + 1.3, L)
         if e["t1"] - e["t0"] < 0.18: e["t1"] = e["t0"] + 0.18
     return ev
 
@@ -442,7 +459,7 @@ def sprite(txt, size, font, fill, stroke=0, stroke_fill=(0, 0, 0), outline_only=
 def fit_size(txt, font, width, lo=60, hi=520):
     from PIL import ImageFont
     font = _font(font, txt)
-    s = hi
+    s = int(hi * (0.8 if W > H else 0.88))  # текст скромніший, ніж був: у референсах він не забиває весь кадр
     while s > lo:
         bb = ImageFont.truetype(str(font), s).getbbox(txt)
         if bb[2] - bb[0] <= width: return s
@@ -491,11 +508,13 @@ def frame_quality(img):
             X0, Y0, X1, Y1 = int(x * w0), int(y * h0), int((x + bw) * w0) + 1, int((y + bh) * h0) + 1
             img[Y0:Y1, X0:X1] = img[max(0, Y0 - 3):Y0 + 1, X0:X1].mean(axis=(0, 1)) if Y0 > 0 else 0
     fs = _faces_small(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), img)
-    cw = min(w0, int(h0 * 9 / 16)); x0 = (w0 - cw) // 2
+    cw = min(w0, int(h0 * ASPECT)); x0 = (w0 - cw) // 2
+    chh = min(h0, int(cw / ASPECT)); y0c = int((h0 - chh) * 0.45)
     big = max(fs, key=lambda f: f[2] * f[3]) if fs else None
     if big is not None and cw < w0: x0 = int(min(w0 - cw, max(0, big[0] + big[2] / 2 - cw / 2)))
-    crop = img[:, x0:x0 + cw]
-    c = cv2.resize(crop, (180, 320), interpolation=cv2.INTER_AREA)
+    crop = img[y0c:y0c + chh, x0:x0 + cw]
+    c = cv2.resize(crop, (max(64, int(round(320 * ASPECT))), 320) if ASPECT <= 1 else (320, max(64, int(round(320 / ASPECT)))),
+                   interpolation=cv2.INTER_AREA)
     g = cv2.cvtColor(c, cv2.COLOR_BGR2GRAY)
     dark = float((g < 28).mean()); hot = float((g > 240).mean())
     hist = np.bincount(g.ravel(), minlength=256).astype(np.float32); hist /= hist.sum()
@@ -520,10 +539,10 @@ def frame_quality(img):
     if not in_crop and (colorful < 22 or contrast < 25): sc -= 1.2  # без людини — лише якщо картинка яскрава сама по собі
     sc -= 4.0 if dark > 0.6 else (1.5 if dark > 0.4 else 0)
     sc -= 1.5 if hot > 0.45 else 0
-    sc -= 1.3 * min(tl, 3) + 25 * ta
+    sc -= 2.4 * min(tl, 3) + 30 * ta                 # вшиті написи/субтитри джерела в едіті — це сміття
     if sharp < 30: sc -= 1.5
     hard = dark > 0.45 or hot > 0.5 or tl >= 1 or ent < 4.3 or edges < 0.012 or sharp < 18
-    return {"hard": bool(hard), "score": sc, "face": bool(in_crop), "fs": round(fw * fw * 9 / 16, 4) if in_crop else 0.0, "br": round(float(g.mean()) / 255, 3),
+    return {"hard": bool(hard), "score": sc, "face": bool(in_crop), "fs": round(fw * fw * ASPECT, 4) if in_crop else 0.0, "br": round(float(g.mean()) / 255, 3),
             "sa": round(colorful / 40 - 1, 2), "txt": tl, "dark": dark, "empty": ent < 4.3 or edges < 0.012}
 
 
@@ -704,14 +723,14 @@ def render_shot(src, t, sh, o, job, out, cam=None, logos=None):
         hh, ww = img.shape[:2]; fs = _faces(img)
         if fs:
             face = True; x, y, fw, fh = max(fs, key=lambda f: f[2] * f[3])
-            ow = min(1.0, hh * 9 / 16 / ww)
+            ow = min(1.0, hh * ASPECT / ww)
             if ow < 1: fx = min(1, max(0, ((x + fw / 2) / ww - ow / 2) / (1 - ow)))
     grade = GRADES.get(o.get("edit_grade") or "warm", GRADES["warm"])
     sfps = src_fps(src) or 30
     sh0 = _src_h(src); up = (H / sh0 / (cam[3] if cam else 1.0)) if sh0 else 1.0
     slow = sh["speed"] < 1 or sh["ramp"] != "none"
     vf = ",".join(x for x in [
-        delogo_vf(src, logos), pre, f"crop=w='min(iw,ih*9/16)':h='min(ih,iw*16/9)':x='(iw-ow)*{fx:.3f}':y='(ih-oh)*0.45'",
+        delogo_vf(src, logos), pre, f"crop=w='min(iw,ih*{ASPECT:.5f})':h='min(ih,iw/{ASPECT:.5f})':x='(iw-ow)*{fx:.3f}':y='(ih-oh)*0.45'",
         "hqdn3d=1.2:1.2:2.5:2.5" if up > 1.3 else "",
         f"scale={W}:{H}:flags=lanczos+accurate_rnd+full_chroma_int", "setsar=1",
         f"cas={min(0.85, 0.35 + 0.25 * max(0.0, up - 1)):.2f}",
@@ -802,7 +821,8 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
     hx = head["x"] if person else W / 2
     cy, pb = H * 0.42, 0.0
     if person:
-        cy, pb = text_spot(mask, head, rc, id(ev), H * {"behind": 0.2, "build": 0.26, "wide": 0.22}.get(st, 0.15))
+        cy, pb = text_spot(mask, head, rc, id(ev), H * {"behind": 0.2, "build": 0.26, "wide": 0.22, "line": 0.12}.get(st, 0.15))
+        if st in ("line", "build"): pb = 0.0  # фразу з кількох слів не ховаємо — інакше зникає слово посередині
     pulse = 1 + 0.06 * beat_pulse
     if st == "behind":
         sz = fit_size(txt, FONT_BIG, W * 0.96, hi=560); spr = sprite(txt, sz, FONT_BIG, ev["fill"])
@@ -899,6 +919,31 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
                 blend(frame, warp(spr, (0.6 + 0.4 * back_ease(min(1.0, q))) * (pulse if n_ == len(rows) - 1 else 1)), W / 2, y + h_ / 2,
                       mask, pb, fade * min(1.0, q * 2))
             y += h_
+    elif st == "line":  # фраза будується зліва направо, слово за словом (як «SHE AIN'T INTO NO DRAMA» у референсі)
+        words = ev.get("words") or [(w, ev["t0"]) for w in txt.split()]
+        f = FONT_WIDE
+        rows = []
+        sz = fit_size(" ".join(w.upper() for w, _ in words), f, W * 0.88, hi=150)
+        if sz < 70 and len(words) > 2:  # не влазить — два рядки
+            half = (len(words) + 1) // 2
+            rows = [words[:half], words[half:]]
+            sz = min(fit_size(" ".join(w.upper() for w, _ in r), f, W * 0.88, hi=150) for r in rows)
+        else: rows = [words]
+        from PIL import ImageFont
+        pf = ImageFont.truetype(str(_font(f, txt)), sz)
+        gapw = pf.getlength(" ")
+        lh = sz * 1.05; y = cy - (len(rows) - 1) * lh / 2
+        k = 0
+        for r in rows:
+            spr_ = [sprite(w.upper(), sz, f, white if (k + n_) % 3 else acc) for n_, (w, _) in enumerate(r)]
+            tw = sum(sp.shape[1] - 8 for sp in spr_) + gapw * (len(r) - 1); x = W / 2 - tw / 2
+            for n_, ((w, tw_), sp) in enumerate(zip(r, spr_)):
+                q = (t - tw_) / 0.16
+                if q > 0:
+                    e_ = back_ease(min(1.0, q))
+                    blend(frame, warp(sp, 0.7 + 0.3 * e_), x + (sp.shape[1] - 8) / 2, y + 30 * (1 - min(1.0, q)), mask, pb, fade * min(1.0, q * 2))
+                x += sp.shape[1] - 8 + gapw
+            k += len(r); y += lh
     elif st == "wide":  # широке слово вгорі з «відлунням» нижче (1MMS / 1MMS)
         sz = fit_size(txt, FONT_WIDE, W * 0.94, hi=240); spr = sprite(txt, sz, FONT_WIDE, white)
         e_ = ease(dt / 0.2); gap = spr.shape[0] * 0.92
@@ -908,11 +953,14 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
             jx = (rc.setdefault(("wj", id(ev), n_), random.uniform(-30, 30)) * (1 - e_)) if n_ else 0
             blend(frame, spr, W / 2 + jx, cy + n_ * gap * e_, mask, pb, fade * q * (1.0, 0.55, 0.25)[n_])
     elif st == "neon":  # неоновий напис у темряві (пауза перед дропом)
-        sz = fit_size(txt, FONT_WIDE, W * 0.82, hi=230); spr = sprite(txt, sz, FONT_WIDE, acc)
+        ws_ = txt.split(); rows_ = [" ".join(ws_[:(len(ws_) + 1) // 2]), " ".join(ws_[(len(ws_) + 1) // 2:])] if len(ws_) > 2 else [txt]
+        sz = min(fit_size(r, FONT_WIDE, W * 0.84, hi=230) for r in rows_)
         fl = 1.0 if dt > 0.16 else (0.25 if int(dt * 40) % 2 else 1.0)  # мерехтіння при ввімкненні
-        blend(frame, glow(spr, acc, 26), W / 2, H * 0.45, None, False, fade * fl)
-        blend(frame, glow(spr, acc, 10), W / 2, H * 0.45, None, False, fade * fl)
-        blend(frame, tint(spr, (255, 255, 255)), W / 2, H * 0.45, None, False, 0.35 * fade * fl)
+        for n_, r in enumerate(rows_):
+            spr = sprite(r, sz, FONT_WIDE, acc); yy = H * 0.45 + (n_ - (len(rows_) - 1) / 2) * sz * 1.1
+            blend(frame, glow(spr, acc, 26), W / 2, yy, None, False, fade * fl)
+            blend(frame, glow(spr, acc, 10), W / 2, yy, None, False, fade * fl)
+            blend(frame, tint(spr, (255, 255, 255)), W / 2, yy, None, False, 0.35 * fade * fl)
     elif st == "rise":  # слово виростає з «підлоги» (лінії під ним) — за людиною, як у плечей
         sz = fit_size(txt, FONT_BIG, W * 0.95, hi=540); spr = sprite(txt, sz, FONT_BIG, ev["fill"])
         h = spr.shape[0]; q = 1 - (1 - min(1.0, dt / 0.28)) ** 4; off = int((1 - q) * h)
@@ -950,7 +998,8 @@ def style_events(ev, rnd, behind_ok, prefer=None):
         s = accent if (k % 4 == 3 and rnd.random() < 0.7) else main
         if s in ("orbit", "cascade") and len(e["txt"]) > 9: s = "behind"
         if s == "wide" and len(e["txt"]) > 8: s = "behind"
-        if e.get("words"): s = "build"
+        if e.get("words"):
+            s = "line" if (len(e["words"]) >= 3 or len(e["txt"]) > 12 or rnd.random() < 0.5) else "build"
         e["style"] = s
         e["color"] = acc_col
         e["fill"] = (246, 246, 246) if (s == main or rnd.random() < 0.5) else acc_col
@@ -998,6 +1047,7 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     cv2 = _cv2()
     d = Path(d); wk = d / "out" / "_e"; wk.mkdir(parents=True, exist_ok=True)
     rnd = random.Random(seed or 1); random.seed(seed or 1)
+    ar_ = o.get("edit_ar") or "4:3"; set_ar(ar_)
     music = o.get("music"); mlen = music_dur(music) if music else 0
     want = max(5.0, float(o.get("edit_sec") or 15))
     if o.get("music_start") in (None, "", "auto"):  # авто: найсильніший шматок треку (приспів / дроп)
@@ -1191,6 +1241,10 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 if fx == "flash" and j < 4: z *= 1 + 0.12 * (1 - j / 4)
                 fr = safe("zoom", lambda: zoom_frame(fr, z, ang, dx, dy), fr)
                 if blur > 0.01: fr = safe("blur", lambda: zoom_blur(fr, blur), fr)
+                if prev is not None and fx in ("zoom", "whip", "spin") and j < 3:  # м'яке перетікання: старий кадр «пролітає» крізь новий
+                    a_ = (0.55, 0.3, 0.12)[j]
+                    pz = safe("xz", lambda: zoom_blur(zoom_frame(prev, 1.12 + 0.1 * j), 0.12), None)
+                    if pz is not None: fr = cv2.addWeighted(pz, a_, fr, 1 - a_, 0)
                 if hblur: fr = safe("whip", lambda: cv2.blur(fr, (hblur | 1, 1)), fr)
                 if (fx == "glitch" and j < 3) or (nfx == "glitch" and tail < 2): fr = safe("glitch", lambda: glitch(fr, rnd, 0.9 if j < 3 else 0.6), fr)
                 if nfx == "pixel" and tail < 3: fr = safe("pixel", lambda: FX.tr_pixel(fr, (3 - tail) / 3), fr)

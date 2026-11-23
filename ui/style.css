@@ -268,3 +268,5 @@ pre.log{background:var(--deep);border:1px solid var(--line);border-radius:8px;pa
 .emode .lay>div:last-child,.emode #layout [data-v=blur]{display:none}
 .emode .lay{grid-template-columns:1fr}
 .emode .fr{max-width:560px}
+
+.f small{display:block;margin-top:6px;font-size:12px;opacity:.65;line-height:1.35}

@@ -60,7 +60,7 @@ class Job:
 DEFAULTS = {"mode": "auto", "min_len": 60, "max_len": 90, "max_clips": 40, "min_score": 2.0, "layout": "blur", "cam": None,
             "subs": True, "model": None, "lang": None, "live_minutes": 0, "skip_start": 180, "seq_limit": 0,
             "speech_filter": True, "review": False, "censor": False, "censor_mode": "beep", "sub_style": {},
-            "hook": False, "zoom": False, "watermark": False, "cover": False, "denoise": False, "compile": False, "compile_min": 8, "teaser_sec": 30, "music": None, "music_start": None, "edit_sec": 15, "edit_textmode": "lyrics", "edit_text": "", "edit_grade": "auto", "edit_style": "auto", "edit_behind": True, "edit_mute": False, "nick": "", "edit_delogo": True,
+            "hook": False, "zoom": False, "watermark": False, "cover": False, "denoise": False, "compile": False, "compile_min": 8, "teaser_sec": 30, "music": None, "music_start": None, "edit_sec": 15, "edit_textmode": "lyrics", "edit_text": "", "edit_grade": "auto", "edit_style": "auto", "edit_ar": "4:3", "edit_behind": True, "edit_mute": False, "nick": "", "edit_delogo": True,
             "vclips": False, "keywords": [], "history": None, "gpu": None, "live_every": 8}
 
 
