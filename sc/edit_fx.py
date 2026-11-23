@@ -707,3 +707,65 @@ TRANS_RULES["crash"] = lambda c: 0.55 + 0.6 * _ON(c, "drop") + 0.3 * _ON(c, "pea
 for _s in STYLES.values():
     if "crash" not in _s["trans"]: _s["trans"].append("crash")
 
+
+# ------------------------------------------------------------------ 3D-камера по карті глибини (шари рухаються з різною швидкістю)
+def look_depth3d(fr, m, head, lt, d, st, acc):
+    """«3D Ken Burns»: кадр розкладається за глибиною (Depth Anything), камера летить уперед і трохи вбік —
+    близьке наближається й зсувається сильніше за далеке, з'являється об'єм. Глибина оновлюється кожні 8 кадрів."""
+    cv2 = _cv2()
+    st["k"] = st.get("k", -1) + 1
+    if st.get("dep") is None or st["k"] % 8 == 0:
+        from .depth import depth as _depth
+        small = cv2.resize(fr, (W // 3, H // 3), interpolation=cv2.INTER_AREA)
+        dm = _depth(small, None)
+        if dm is None: return LOOKS["parallax"](fr, m, head, lt, d, st, acc) if m is not None else fr
+        dm = cv2.GaussianBlur(dm, (0, 0), 3)
+        st["dep"] = cv2.resize(dm, (W, H), interpolation=cv2.INTER_LINEAR)
+        if "dir" not in st: st["dir"] = float(np.random.choice([-1, 1]))
+        if "grid" not in st:
+            yy, xx = np.mgrid[0:H, 0:W].astype(np.float32); st["grid"] = (xx, yy)
+    dep = st["dep"]; xx, yy = st["grid"]
+    p = ease_io(min(1.0, lt / max(0.4, d)))
+    cx = head["x"] if head else W / 2; cy = head["cy"] if head else H / 2
+    zoom = 0.02 + 0.11 * dep            # далеке майже стоїть, близьке наїжджає
+    shift = st["dir"] * W * 0.035 * (dep - 0.35)  # орбіта: близьке й далеке зсуваються в різні боки
+    sx = 1 / (1 + zoom * p)
+    mx = cx + (xx - cx) * sx - shift * p
+    my = cy + (yy - cy) * sx
+    return cv2.remap(fr, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+
+
+LOOKS["depth3d"] = look_depth3d
+LOOK_RULES["depth3d"] = lambda c: 0.7 + 0.5 * _ON(c, "intro", "build", "resolve") + 0.3 * (c["d"] >= 0.7) - 0.8 * (c["d"] < 0.45)
+
+
+# ------------------------------------------------------------------ «поворот куба» (Box Turn): кадри — грані куба, що провертається
+def tr_cube(prev, fr, q, direction=1):
+    cv2 = _cv2()
+    if prev is None: return fr
+    q = min(1.0, max(0.0, q)); a = q * math.pi / 2
+    out = np.zeros_like(fr)
+    def face(img, ang, side):
+        c = math.cos(ang); s_ = math.sin(ang)
+        w2 = W * c
+        if w2 < 2: return None
+        x0 = (W - w2) / 2 + side * (W / 2) * s_ * direction
+        dz = 0.18 * s_
+        src = np.float32([[0, 0], [W, 0], [W, H], [0, H]])
+        if side * direction > 0:
+            dst = np.float32([[x0, H * dz / 2], [x0 + w2, 0], [x0 + w2, H], [x0, H - H * dz / 2]])
+        else:
+            dst = np.float32([[x0, 0], [x0 + w2, H * dz / 2], [x0 + w2, H - H * dz / 2], [x0, H]])
+        return cv2.warpPerspective(img, cv2.getPerspectiveTransform(src, dst), (W, H))
+    for img, ang, side in ((prev, a, -1), (fr, math.pi / 2 - a, 1)):
+        f = face(img, ang, side)
+        if f is not None:
+            mk = f.sum(axis=2) > 0
+            out[mk] = (f[mk] * (0.55 + 0.45 * math.cos(ang))).astype(np.uint8)
+    return out
+
+
+for _s in STYLES.values():
+    if "cube" not in _s["trans"] and _s is not STYLES.get("noir"): _s["trans"].append("cube")
+TRANS_RULES["cube"] = lambda c: 0.45 + 0.35 * _ON(c, "build", "peak") + 0.2 * (c["d"] >= 0.5)
+

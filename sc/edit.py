@@ -895,6 +895,7 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
         elif before_drop and d >= 0.4: speed, ramp = 1.6, "in"
         elif is_drop: speed, ramp = 1.0, "none"
         elif a > drop and d >= 0.35 and rnd.random() < 0.15: speed, ramp = 1.0, "stutter"
+        elif a > drop and d >= 0.55 and rnd.random() < 0.3: speed, ramp = 1.8, "velo"
         elif a > drop and d >= 0.5 and rnd.random() < 0.35: speed, ramp = 1.7, rnd.choice(["in", "out"])
         else: speed, ramp = (0.85 if a < drop else 1.15), "none"
         # ---- «режисер»: контекст шоту → найкращий перехід, образ і акцент
@@ -975,6 +976,9 @@ def render_shot(src, t, sh, o, job, out, cam=None, logos=None):
 def ramp_index(j, n, nsrc, kind):
     """Велосіті: швидко → повільно (in) або повільно → швидко (out)."""
     x = j / max(1, n - 1)
+    if kind == "velo":  # велосіті: швидко → дуже повільно посередині → знову швидко (тренд №1 едітів)
+        y = 0.5 + 0.5 * math.copysign(abs(2 * x - 1) ** 0.45, 2 * x - 1)
+        return min(nsrc - 1, int(round(y * (nsrc - 1))))
     if kind == "stutter":  # «заїкання»: кадр тримається 3 кадри і стрибає — класика едітів
         return min(nsrc - 1, int(round((j - j % 3) / max(1, n - 1) * (nsrc - 1))))
     if kind == "in": y = 1 - (1 - x) ** 2.6
@@ -1570,6 +1574,9 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                             if "shz" not in sst: sst["shz"] = rnd.random() < 0.6
                             fr = safe("strips", lambda: FX.tr_strips(prev_out, fr, qv, vel, 3, sst["shz"]), fr)
                         else: fr = safe("splitin", lambda: FX.tr_splitin(prev_out, fr, qv, vel), fr)
+                if prev is not None and fx == "cube" and j < 8:  # поворот куба
+                    if "cold" not in sst: sst["cold"] = prev.copy(); sst["cdir"] = rnd.choice([-1, 1])
+                    fr = safe("cube", lambda: FX.tr_cube(sst["cold"], fr, ease((j + 1) / 8), sst["cdir"]), fr)
                 if prev is not None and fx == "shutter" and j < 6: fr = safe("shutter", lambda: FX.tr_shutter(prev, fr, (j + 1) / 6), fr)
                 if leak is not None:
                     a = 0.32 * (0.5 + 0.5 * math.sin(t * 3 + i))
