@@ -246,39 +246,51 @@ def _sample(src, t, pre, job):
     return cv2.imdecode(np.frombuffer(out, np.uint8), cv2.IMREAD_COLOR) if out else None
 
 
-def _bad_frame(src, t):
-    """Перевірка конкретного моменту шоту: чорний екран / титри / вшиті написи / сильний змаз. -> 0 (добре) .. 3 (погано)"""
+def _shot_quality(src, t, span):
+    """Якість саме тих секунд, що підуть у ролик: гірший з двох кадрів (початок і ~70 % шоту) + рух між ними."""
     cv2 = _cv2()
-    img = _sample(src, t, "", None)
-    if img is None: return 3
-    h0, w0 = img.shape[:2]
-    img = cv2.resize(img, (180, 320) if h0 > w0 else (320, 180), interpolation=cv2.INTER_AREA)
-    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    bad = 0
-    if float((g < 28).mean()) > 0.5: bad += 2
-    n, area = _text_lines(g)
-    if n >= 2 or area > 0.012: bad += 2
-    elif n == 1: bad += 1
-    if float(cv2.Laplacian(g, cv2.CV_32F).var()) < 25: bad += 1
-    return bad
+    a, b = _sample(src, t + 0.1, "", None), _sample(src, t + span * 0.7, "", None)
+    if a is None or b is None: return -9.0
+    qa, qb = frame_quality(a), frame_quality(b)
+    q = min(qa["score"], qb["score"])
+    ga = cv2.resize(cv2.cvtColor(a, cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
+    gb = cv2.resize(cv2.cvtColor(b, cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
+    mot = float(np.abs(ga - gb).mean())
+    if mot < 2.0: q -= 0.4          # зовсім статичний кадр — нудно
+    elif mot > 60: q -= 1.0         # там склейка або хаос — кадр «непонятний»
+    return q
 
 
 def verify_shots(shots, vpool, src, off, job=None):
-    """Кадри обирались за ключовими кадрами; тут перевіряємо саме ті секунди, що підуть у ролик (початок і середину шоту).
-    Поганий шот міняємо на наступного кандидата з пулу (теж перевіреного)."""
+    """Кадри обирались за пробними кадрами; тут перевіряємо саме ті секунди, що підуть у ролик.
+    Слабкий шот міняємо на наступного найкращого кандидата (теж перевіреного). -> скільки замінено"""
+    scores = sorted(c["score"] for c in vpool)
+    thr = min(3.0, scores[int(len(scores) * 0.55)]) if scores else 0.0
     used = [sh["t"] for sh in shots]
     cands = sorted(vpool, key=lambda c: -c["score"])
     fixed = 0
-    for sh in shots:
-        span = (sh["b"] - sh["a"]) * sh["speed"]
-        def score_at(t): return max(_bad_frame(src, t - off + 0.1), _bad_frame(src, t - off + span * 0.7))
+    for si, sh in enumerate(shots):
         if job is not None: job.check()
-        if score_at(sh["t"]) < 2: continue
-        for c in cands:
-            t = max(0.0, c["t"] - 0.15)
-            if any(abs(t - u) < 3 for u in used): continue
-            if score_at(t) < 2:
-                used.append(t); sh["t"] = t; fixed += 1; break
+        span = (sh["b"] - sh["a"]) * sh["speed"]
+        neigh = [shots[k] for k in (si - 1, si + 1) if 0 <= k < len(shots)]
+        q0 = _shot_quality(src, sh["t"] - off, span)
+        if q0 >= thr: continue
+        best, bq = None, -9e9
+        qc = {}
+        for gap in (2.5, 1.0, 0.0):  # коротке джерело — ближчі моменти, а в крайньому разі — повтор гарного моменту, ніж поганий кадр
+            tried = 0
+            for c in cands:
+                t = max(0.0, c["t"] - 0.15)
+                if any(abs(t - u) < gap for u in used): continue
+                if any(abs(t - nb["t"]) < 1.5 for nb in neigh): continue  # той самий момент двічі поспіль — ні
+                if t not in qc: qc[t] = _shot_quality(src, t - off, span); tried += 1
+                dup = sum(abs(t - u) < 1.0 for u in used)
+                qe = qc[t] - 1.3 * dup  # повтори — лише якщо справді краще
+                if qe > bq: best, bq = t, qe
+                if qe >= thr or tried >= 6: break
+            if bq >= thr - 0.8 * (gap == 0.0): break
+        if best is not None and bq > -9:
+            used.append(best); sh["t"] = best; fixed += 1
     return fixed
 
 
@@ -463,13 +475,60 @@ def ease(x): x = min(1.0, max(0.0, x)); return 1 - (1 - x) ** 3
 
 
 # ------------------------------------------------------------------ аналіз картинки джерела
+def frame_quality(img):
+    """Чи гарний кадр для едіту — рахується по тій частині, що реально піде у вертикальний ролик (9:16, по обличчю).
+    Штрафує: темряву/пересвіт, «порожні» кадри (стіна, підлога, розмитий шматок предмета), вшиті написи, змаз;
+    дає бали: людина з обличчям середнього розміру, деталізація, контраст, колір. -> dict(score, face, fs, br, sa, ...)"""
+    cv2 = _cv2()
+    h0, w0 = img.shape[:2]
+    fs = _faces_small(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), img)
+    cw = min(w0, int(h0 * 9 / 16)); x0 = (w0 - cw) // 2
+    big = max(fs, key=lambda f: f[2] * f[3]) if fs else None
+    if big is not None and cw < w0: x0 = int(min(w0 - cw, max(0, big[0] + big[2] / 2 - cw / 2)))
+    crop = img[:, x0:x0 + cw]
+    c = cv2.resize(crop, (180, 320), interpolation=cv2.INTER_AREA)
+    g = cv2.cvtColor(c, cv2.COLOR_BGR2GRAY)
+    dark = float((g < 28).mean()); hot = float((g > 240).mean())
+    hist = np.bincount(g.ravel(), minlength=256).astype(np.float32); hist /= hist.sum()
+    ent = float(-(hist[hist > 0] * np.log2(hist[hist > 0])).sum())
+    edges = float((cv2.Canny(g, 60, 150) > 0).mean())
+    b_, g_, r_ = [c[..., k].astype(np.float32) for k in range(3)]
+    rg, yb = r_ - g_, 0.5 * (r_ + g_) - b_
+    colorful = float(np.sqrt(rg.std() ** 2 + yb.std() ** 2) + 0.3 * np.sqrt(rg.mean() ** 2 + yb.mean() ** 2))
+    contrast = float(g.std())
+    sharp = float(cv2.Laplacian(g, cv2.CV_32F).var())
+    tl, ta = _text_lines(g)
+    fw = (big[2] / cw) if big is not None else 0.0  # ширина обличчя відносно кадру ролика
+    in_crop = big is not None and x0 <= big[0] + big[2] / 2 <= x0 + cw
+    cl = lambda v: min(1.0, max(0.0, v))
+    sc = 0.0
+    if in_crop:
+        sc += 2.4 + 1.0 * cl(fw / 0.16)              # людина в кадрі — головне в едіті
+        if fw > 0.7: sc -= 1.2                         # обличчя на весь екран — «непонятний» кадр
+    sc += 0.9 * cl((ent - 4.6) / 2.4) + 0.8 * cl(edges / 0.07) + 0.6 * cl(colorful / 55) + 0.6 * cl((contrast - 22) / 38)
+    sc += 0.7 * cl((math.log1p(sharp) - 3.0) / 3.0)
+    if ent < 4.3 or edges < 0.012: sc -= 2.5         # порожній кадр
+    if not in_crop and (colorful < 22 or contrast < 25): sc -= 1.2  # без людини — лише якщо картинка яскрава сама по собі
+    sc -= 4.0 if dark > 0.6 else (1.5 if dark > 0.4 else 0)
+    sc -= 1.5 if hot > 0.45 else 0
+    sc -= 1.3 * min(tl, 3) + 25 * ta
+    if sharp < 30: sc -= 1.5
+    return {"score": sc, "face": bool(in_crop), "fs": round(fw * fw * 9 / 16, 4) if in_crop else 0.0, "br": round(float(g.mean()) / 255, 3),
+            "sa": round(colorful / 40 - 1, 2), "txt": tl, "dark": dark, "empty": ent < 4.3 or edges < 0.012}
+
+
 def scan_video(src, dur, skip=(), job=None):
-    """Ключові кадри відео → оцінка «цікавості» картинки: обличчя, різкість, колір, яскравість.
-    Один швидкий прохід (декодуються лише ключові кадри). -> [{t, score, face}]"""
+    """Кадри відео → оцінка якості (`frame_quality`). Короткі відео (до 12 хв) — 1.5 кадри/с, довгі — лише ключові кадри.
+    -> [{t, score, face, fs, br, sa, sig, txt}]"""
     import threading, re as _re
     cv2 = _cv2()
-    w, h = 320, 180
-    p = subprocess.Popen([ffmpeg(), "-v", "info", "-hide_banner", "-skip_frame", "nokey", "-i", str(src), "-an", "-vf", f"scale={w}:{h},showinfo",
+    sw, shh = _src_wh(src)
+    if sw and shh and shh > sw: w, h = 180, 320    # вертикальне джерело не стискаємо
+    else: w, h = 320, 180
+    dense = 0 < dur <= 720
+    pre = ["-skip_frame", "nokey"] if not dense else []
+    vf = ("fps=1.5," if dense else "") + f"scale={w}:{h},showinfo"
+    p = subprocess.Popen([ffmpeg(), "-v", "info", "-hide_banner", *pre, "-i", str(src), "-an", "-vf", vf,
                           "-vsync", "vfr", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     times = []
 
@@ -484,31 +543,18 @@ def scan_video(src, dur, skip=(), job=None):
         if len(buf) < w * h * 3: break
         if job is not None: job.check()
         img = np.frombuffer(buf, np.uint8).reshape(h, w, 3)
-        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        fs = _faces_small(g, img)
-        face = max((f[2] * f[3] for f in fs), default=0) / (w * h)
-        sharp = float(cv2.Laplacian(g, cv2.CV_32F).var())
-        sat = float(cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[..., 1].mean())
-        bright = float(g.mean())
-        dark = float((g < 28).mean())
-        tl, ta = _text_lines(g)
-        sig = cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2HSV), (4, 4), interpolation=cv2.INTER_AREA)[..., [0, 2]].ravel().tolist()
-        feats.append((k, face, sharp, sat, bright, dark, tl, ta, sig)); k += 1
+        q = frame_quality(img)
+        q["sig"] = [int(x) for x in cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2HSV), (4, 4), interpolation=cv2.INTER_AREA)[..., [0, 2]].ravel()]
+        feats.append((k, q)); k += 1
     p.wait(); th.join(timeout=2)
-    if not feats: return []
-    sh = np.log1p([f[2] for f in feats]); sh = (sh - sh.mean()) / (sh.std() + 1e-6)
-    sa = np.array([f[3] for f in feats]); sa = (sa - sa.mean()) / (sa.std() + 1e-6)
     out = []
-    for i, (k, face, _, _, bright, dark, tl, ta, sig) in enumerate(feats):
-        t = times[k] if k < len(times) else k * 2.0
+    for k, q in feats:
+        t = times[k] if k < len(times) else k / 1.5
         if t < dur * 0.02 or t > dur * 0.985: continue
         if any(a - 1 <= t <= b + 1 for a, b in skip): continue  # реклама
-        sc = 3.0 * min(1.0, face * 25) + 0.7 * sh[i] + 0.35 * sa[i] - (2.5 if bright < 38 else 0) - (1.0 if bright > 235 else 0)
-        sc -= 4.0 if dark > 0.6 else (1.5 if dark > 0.4 else 0)          # чорні титри, затемнення
-        sc -= 1.3 * min(tl, 3) + 25 * ta                                   # вшиті написи, субтитри, титри
-        if sh[i] < -1.2: sc -= 1.5                                         # змазаний кадр
-        out.append({"t": t, "score": float(sc), "face": face > 0, "fs": round(float(face), 4), "br": round(bright / 255, 3),
-                    "sa": round(float(sa[i]), 2), "sig": [int(x) for x in sig], "txt": tl})
+        q["t"] = t; q["score"] = float(q["score"])
+        q.pop("dark", None); q.pop("empty", None)
+        out.append(q)
     return out
 
 
@@ -524,6 +570,9 @@ def _text_lines(g):
         if 4 <= hh <= h * 0.12 and ww >= hh * 2.2 and ww > w * 0.12 and a > 0.4 * ww * hh:
             roi = g[y:y + hh, x:x + ww]
             if roi.max() > 195 or roi.min() < 45: n += 1; area += ww * hh
+        elif h * 0.12 < hh <= h * 0.32 and ww >= w * 0.3 and ww >= hh * 1.3 and a > 0.35 * ww * hh:
+            roi = g[y:y + hh, x:x + ww]  # великий напис/логотип: багато майже білих (або майже чорних) пікселів у смузі
+            if float((roi > 228).mean()) > 0.22 or float((roi < 20).mean()) > 0.35: n += 2; area += ww * hh
     return n, area / (h * w)
 
 
@@ -567,20 +616,22 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
     # вибір моментів: найкращі з відстанню між ними → у хронологічному порядку (історія), найсильніший — на дроп
     picks = []
     if video_pool:
-        floor = sorted(c["score"] for c in video_pool)[len(video_pool) // 5]  # нижня п'ятірка — лише якщо зовсім нема з чого
-        for thr_d in (28, 16, 0):  # спершу різні сцени, потім м'якше
-            for c in sorted(video_pool, key=lambda x: -x["score"]):
+        sc_ = sorted(c["score"] for c in video_pool)
+        floor = sc_[len(sc_) // 2] if len(sc_) >= 3 * n else sc_[len(sc_) // 5]  # лише краща половина кадрів, якщо є з чого
+        good = [c for c in video_pool if c["score"] >= floor] or video_pool
+        for thr_d, gap, pool_ in ((28, 3.0, good), (16, 3.0, good), (0, 3.0, good), (0, 1.2, good), (0, 1.2, video_pool)):
+            for c in sorted(pool_, key=lambda x: -x["score"]):  # спершу різні сцени з кращої половини, потім м'якше
                 if len(picks) >= n: break
-                if c in picks or (c["score"] < floor and thr_d): continue
-                if all(abs(c["t"] - p["t"]) > 3.0 and _sig_d(c.get("sig"), p.get("sig")) > thr_d for p in picks): picks.append(c)
+                if c in picks: continue
+                if all(abs(c["t"] - p["t"]) > gap and _sig_d(c.get("sig"), p.get("sig")) > thr_d for p in picks): picks.append(c)
             if len(picks) >= n: break
-        while len(picks) < n: picks.append(rnd.choice(video_pool))
+        while len(picks) < n: picks.append(rnd.choice(good[:max(3, len(good) // 2)]))
         best = max(picks, key=lambda x: x["score"])
         picks = sorted([p for p in picks if p is not best], key=lambda x: x["t"])
         di = min(range(n), key=lambda i: abs(cuts[i] - drop))
         picks.insert(min(di, len(picks)), best)
         while len(picks) < n: picks.append(dict(rnd.choice(video_pool)))  # мало кадрів у джерелі — повтори в кінці
-    flashes = 0; shots = []; hits_n = 0; used_tr, used_look, used_hit = {}, {}, {}
+    flashes = 0; shots = []; hits_n = 0; used_tr, used_look, used_hit, used_mv = {}, {}, {}, {}
     for i in range(n):
         a, b = cuts[i], cuts[i + 1]; d = b - a
         bi = min(range(len(m["beats"])), key=lambda k: abs(m["beats"][k] - a)) if m["beats"] else 0
@@ -613,6 +664,7 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
             if hit == "flash" and flashes >= max_flash: hit = None
             if hit: hits_n += 1; flashes += hit == "flash"
         if hit == "flash": fx = "flash" if fx in ("cut", "none") else fx
+        move = FX.choose(FX.MOVE_RULES, c, rnd, (), used_mv, prev_sh.get("move") if prev_sh else None, noise=0.5)
         look = None if blk else FX.choose(FX.LOOK_RULES, c, rnd, style["looks"], used_look, prev_sh["look"] if prev_sh else None,
                                          person_only=FX.PERSON_LOOKS)
         cut_in = (not blk and d >= 0.55 and i > 0 and fx in ("cut", "none", "zoom", "whip") and look not in ("sticker", "popframe", "thermal")
@@ -624,7 +676,7 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
             k = ranked[(0 if is_drop else i) % len(ranked)]; t = pool[k]["peak"] + rnd.uniform(-3, 2)
         shots.append({"a": a, "b": b, "k": k, "t": t, "speed": speed, "ramp": ramp, "hard": st >= thr, "drop": is_drop,
                       "fx": fx, "resolve": a >= resolve - 0.01, "look": look, "cutin": cut_in, "dir": rnd.choice([-1, 1]),
-                      "hit": hit, "blackout": blk, "sec": sec})
+                      "hit": hit, "blackout": blk, "sec": sec, "move": move})
     return shots
 
 
@@ -951,11 +1003,11 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
         cache = d / "vscan.json"
         try: vpool = _json.loads(cache.read_text()) if cache.exists() else None
         except Exception: vpool = None
-        if isinstance(vpool, dict) and vpool.get("v") == 3: vpool = vpool["items"]
+        if isinstance(vpool, dict) and vpool.get("v") == 4: vpool = vpool["items"]
         else:
             job.step("edit_scan", 60)
             vpool = scan_video(meta["video"], meta.get("duration") or 0, skip=(meta.get("info") or {}).get("skip") or [], job=job)
-            cache.write_text(_json.dumps({"v": 3, "items": vpool}))
+            cache.write_text(_json.dumps({"v": 4, "items": vpool}))
         for v in vpool:  # моменти, де щось відбувається за звуком/чатом, — трохи вище
             if any(abs(v["t"] - c["peak"]) < 4 for c in pool if c.get("final", 0) > 0.5): v["score"] += 0.6
         if len(vpool) < 8: vpool = None
@@ -1101,6 +1153,15 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 if lh in strong and t - lh < 0.2:
                     amp = 26 * math.exp(-(t - lh) / 0.07); dx, dy = rnd.uniform(-amp, amp), rnd.uniform(-amp, amp)
                 # ---- переходи з узгодженою швидкістю: рух не зупиняється на склейці
+                # ---- рух камери всередині шоту (обирає «режисер») + хук на першому кадрі ролика
+                prog = j / max(1, pr["n"] - 1); lt0 = j / FPS; mv = sh.get("move")
+                eio = prog * prog * (3 - 2 * prog)
+                if mv == "push": z *= 1 + 0.09 * eio
+                elif mv == "pull": z *= 1.09 - 0.09 * eio
+                elif mv == "pan": z *= 1.08; dx += sh.get("dir", 1) * W * 0.05 * (prog - 0.5) * 2
+                elif mv == "drift": z *= 1.04; dx += 12 * math.sin(t * 2.1 + i); dy += 9 * math.sin(t * 1.7 + 2 * i)
+                elif mv == "punch": z *= 1 + 0.28 * (1 - ease(lt0 / 0.3))
+                if i == 0: z *= 1 + 0.35 * (1 - ease(lt0 / 0.45))
                 fx, nfx = sh["fx"], (nxt["fx"] if nxt else "cut")
                 tail = pr["n"] - 1 - j  # кадрів до кінця шоту
                 blur = 0.0; hblur = 0
@@ -1140,6 +1201,8 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                         col = (255, 255, 255) if i % 2 else ev_acc
                         fr = safe("silhouette", lambda: FX.hit_silhouette(fr, mask, q, col), fr)
                     elif sh["hit"] == "invert": fr = safe("invert", lambda: FX.hit_invert(fr, q * 0.9), fr)
+                if sh.get("hit") == "chroma" and j < 4:
+                    fr = safe("chroma", lambda: FX.hit_chroma(fr, (1.0, 0.7, 0.4, 0.15)[j]), fr)
                 if sh.get("blackout"):
                     fr = safe("blackout", lambda: FX.blackout(fr, mask if head else None, lt, dshot, ev_acc), fr)
                 if sh.get("cutin") and head is not None and lt < 0.5:

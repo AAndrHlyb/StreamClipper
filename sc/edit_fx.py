@@ -265,6 +265,39 @@ LOOKS = {"spotlight": look_spotlight, "colorpop": look_colorpop, "bwred": look_b
 PERSON_LOOKS = {"spotlight", "colorpop", "bwred", "bokeh", "outline", "echo", "popframe", "tunnel", "bulge"}
 
 
+def look_vhs(fr, m, head, lt, d, st, acc):
+    """Плівка VHS: розмиті кольори, рядки розгортки, шум, легке «плавання» рядка."""
+    cv2 = _cv2()
+    out = fr.astype(np.float32)
+    ycc = cv2.cvtColor(fr, cv2.COLOR_BGR2YCrCb)
+    ycc[..., 1] = cv2.blur(ycc[..., 1], (21, 1)); ycc[..., 2] = cv2.blur(ycc[..., 2], (21, 1))  # кольори «течуть»
+    ycc[..., 1] = np.roll(ycc[..., 1], 6, 1)
+    out = cv2.cvtColor(ycc, cv2.COLOR_YCrCb2BGR).astype(np.float32)
+    out[::4] *= 0.82                                                   # рядки розгортки
+    out += np.random.normal(0, 7, (H // 4, W // 4, 1)).repeat(4, 0).repeat(4, 1)
+    y0 = int((lt * 900) % H); out[y0:y0 + 24] = np.roll(out[y0:y0 + 24], 18, 1)  # смуга трекінгу
+    out = out * np.array([0.96, 1.0, 1.06], np.float32)
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def hit_chroma(fr, q):
+    """Удар лінзою: кадр «вибухає» від центру (бочка) + сильне RGB-розшарування, затухає за 3–4 кадри."""
+    cv2 = _cv2()
+    if q <= 0: return fr
+    s = 1 + 0.08 * q
+    M = cv2.getRotationMatrix2D((W / 2, H / 2), 0, s)
+    z = cv2.warpAffine(fr, M, (W, H), borderMode=cv2.BORDER_REFLECT)
+    d = int(26 * q)
+    b, g, r = cv2.split(z)
+    Mb = cv2.getRotationMatrix2D((W / 2, H / 2), 0, 1 + 0.025 * q); Mr = cv2.getRotationMatrix2D((W / 2, H / 2), 0, 1 - 0.02 * q)
+    b = np.roll(cv2.warpAffine(b, Mb, (W, H), borderMode=cv2.BORDER_REFLECT), d, 1)
+    r = np.roll(cv2.warpAffine(r, Mr, (W, H), borderMode=cv2.BORDER_REFLECT), -d, 1)
+    return cv2.merge([b, g, r])
+
+
+LOOKS["vhs"] = look_vhs
+
+
 # ------------------------------------------------------------------ акценти на удар (2–4 кадри)
 def hit_silhouette(fr, m, q, color=(255, 255, 255)):
     """Людина спалахує білим силуетом із сяйвом, фон темнішає (як у референсах на сильну долю)."""
@@ -403,6 +436,7 @@ LOOK_RULES = {
     "glow":      lambda c: 0.7 * c["br"] + 0.4 * c["fbr"] + 0.3 * _ON(c, "intro", "resolve"),
     "thermal":   lambda c: 0.5 * c["face"] + 0.7 * c["bass"] * c["en"] + 0.4 * _ON(c, "drop", "peak"),
     "smear":     lambda c: 0.4 * (c["fs"] < 0.08) + 0.5 * c["busy"] + 0.3 * _ON(c, "build", "peak"),
+    "vhs":       lambda c: 0.5 * (1 - c["br"]) + 0.3 * _ON(c, "intro", "build") + 0.3 * (c["fsa"] < 0),
     "bulge":     lambda c: (0.9 if c["fs"] > 0.03 else -1) * (0.7 if c["sec"] in ("drop", "peak") else 0.2) + 0.3 * c["st"],
 }
 TRANS_RULES = {
@@ -421,6 +455,14 @@ HIT_RULES = {  # акцент на початку шоту на сильну д�
     "flash":      lambda c: 0.45 + 0.4 * _ON(c, "drop") + 0.2 * c["br"],
     "silhouette": lambda c: (0.7 if c["face"] else -2) + 0.4 * c["br"] + 0.3 * _ON(c, "drop"),
     "invert":     lambda c: 0.35 + 0.5 * c["bass"] + 0.2 * c["busy"],
+    "chroma":     lambda c: 0.45 + 0.4 * c["bass"] + 0.3 * c["en"],
+}
+MOVE_RULES = {  # рух «камери» всередині шоту
+    "push":  lambda c: 0.5 + 0.5 * c["face"] + 0.4 * _ON(c, "intro", "build", "pre"),
+    "pull":  lambda c: 0.3 + 0.6 * _ON(c, "resolve", "intro") + 0.2 * (1 - c["en"]),
+    "pan":   lambda c: 0.3 + 0.5 * (1 - c["face"]) + 0.3 * _ON(c, "build"),
+    "drift": lambda c: 0.3 + 0.5 * _ON(c, "peak") + 0.3 * c["busy"],
+    "punch": lambda c: 0.2 + 0.9 * _ON(c, "drop") + 0.4 * c["st"] * _ON(c, "peak"),
 }
 
 
