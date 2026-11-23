@@ -197,7 +197,10 @@ def _run(job):
             chat = chat_f.result()
         else:
             chat = _chat(job, d, meta, info, 0, n, o)
-        clips = _select(job, d, meta, o, 0, n, chat, used=history_used(meta["uploader"], meta["vid"]) if o["history"] else [])
+        if mode == "edit":  # едіт під музику: текст береться з пісні, розпізнавати мову всього відео не потрібно
+            clips = _select_fast(job, meta, o, 0, n, chat)
+        else:
+            clips = _select(job, d, meta, o, 0, n, chat, used=history_used(meta["uploader"], meta["vid"]) if o["history"] else [])
     else:
         clips = _sequential(job, meta, o, n)
     if mode == "teaser":
@@ -371,6 +374,17 @@ def _select(job, d, meta, o, a, b, chat, used=(), audio=None, audio_off=0.0, p0=
     out = sorted(sorted(out, key=lambda c: -c["final"])[:keep], key=lambda c: c["start"])
     job.extra["review_src"] = {"path": audio, "off": audio_off}
     return out
+
+
+def _select_fast(job, meta, o, a, b, chat):
+    """Без розпізнавання мови: лише гучність/чат → моменти, де щось відбувається (для едіту під музику)."""
+    used = [tuple(x) for x in (meta.get("info") or {}).get("skip", [])]
+    job.step("analyze", 35)
+    audio, audio_off = meta["audio"], meta.get("audio_offset", 0.0)
+    loud = loudness_par(audio, int(math.ceil(b - a)) + 1, job, start=a - audio_off, dur=b - a, parts=perf()["loud"])
+    cands, keep = find_peaks(job, loud, chat, o, offset=a, used=used)
+    job.log("cands", len(cands), keep)
+    return [{"start": max(a, c["peak"] - 6), "end": min(b, c["peak"] + 6), "final": float(c.get("score") or 1), **c} for c in cands]
 
 
 def _sequential(job, meta, o, n):

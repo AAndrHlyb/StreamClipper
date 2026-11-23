@@ -75,7 +75,7 @@ def match(text, with_score=False):
             continue
         r = max(difflib.SequenceMatcher(None, t, v).ratio(), difflib.SequenceMatcher(None, t2, v.replace(" and ", " ")).ratio())
         if r > bs: best, bs = b, r
-    if bs < 0.84: best = None
+    if bs < 0.88: best = None
     return (best, bs) if with_score else best
 
 
@@ -88,6 +88,7 @@ def find(words):
             if i + n > len(words): continue
             seg = words[i:i + n]
             if n > 1 and seg[-1]["s"] - seg[0]["e"] > 1.2: continue
+            if max(w.get("p", 1.0) for w in seg) < 0.45: continue  # модель сама не впевнена — бренд не вигадуємо
             b, r = match(" ".join(w["w"] for w in seg), True)
             if b and r + 0.001 * n > hk:
                 hit, hk = (i, i + n, b[0], b[1]), r + 0.001 * n

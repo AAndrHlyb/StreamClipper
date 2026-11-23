@@ -136,7 +136,7 @@ def lyrics(path, start, dur, o, job):
     """Слова пісні з таймінгом: 1) вокал відокремлюється від музики (UVR MDX-Net), 2) визначається мова пісні
     (кілька відрізків, топ-2 мови), 3) розпізнавання з контекстом і пошуком променем, 4) чистка «зациклень»."""
     from . import vocals as V
-    s0 = max(0.0, start - 3.0); d0 = dur + 5.0  # трохи контексту довкола — слова на межі не губляться
+    s0 = max(0.0, start - 8.0); d0 = dur + 12.0  # контекст довкола: модель краще «тримає» мову й рядки пісні
     job.step("edit_vocals", 61)
     y = None
     try:
@@ -148,12 +148,15 @@ def lyrics(path, start, dur, o, job):
     if y is None or len(y) < 16000: return []
     y = y / (np.abs(y).max() + 1e-6) * 0.9
     job.step("edit_lyrics", 62)
-    oo = dict(o)
-    if oo.get("model") in (None, "base"): oo["model"] = "small"  # для співу base замало
-    try:
-        mdl = A.whisper(oo, job)
-    except Exception:
-        return []
+    # спів розпізнається значно гірше за мову: для пісні — найсильніша модель large-v3-turbo (≈1.6 ГБ, качається раз),
+    # якщо не вийде — модель з налаштувань (мін. small)
+    mdl = None
+    for name in ("large-v3-turbo", o.get("model") if o.get("model") not in (None, "base", "tiny") else "small"):
+        try:
+            mdl = A.whisper(dict(o, model=name), job); break
+        except Exception as e:
+            job.log("vocal_fallback", f"{name}: {str(e)[:60]}")
+    if mdl is None: return []
     langs = []
     try:
         lang, prob, allp = mdl.detect_language(y, language_detection_segments=4)
@@ -164,8 +167,7 @@ def lyrics(path, start, dur, o, job):
         segs, _ = mdl.transcribe(audio, language=lang, word_timestamps=True, beam_size=5, best_of=5, temperature=[0.0, 0.2, 0.4],
                                  vad_filter=vad, vad_parameters={"threshold": 0.25, "min_silence_duration_ms": 300},
                                  condition_on_previous_text=ctx, no_speech_threshold=0.6, compression_ratio_threshold=2.6,
-                                 hallucination_silence_threshold=2.0 if vad else None,
-                                 hotwords="Dolce Gabbana, Gucci, Louis Vuitton, Prada, Balenciaga, Versace, Chanel, Dior, Rolex, Lamborghini")
+                                 hallucination_silence_threshold=2.0 if vad else None)
         ws = []
         for sg in segs:
             for w in (sg.words or []):
@@ -180,6 +182,14 @@ def lyrics(path, start, dur, o, job):
         except Exception: continue
         sc = sum(w["p"] for w in ws)
         if sc > best_sc: best, best_sc, best_lang = ws, sc, lang
+    if len(best) < 12:  # інколи відокремлення вокалу шкодить (сильна обробка голосу) — пробуємо й оригінальний мікс
+        try:
+            ym = A.pcm(path, s0, d0) / 32768.0
+            ws = tx(ym, best_lang or (langs[0][0] if langs else None), 0.0)
+            sc = sum(w["p"] for w in ws)
+            if sc > best_sc * 1.15: best, best_sc = ws, sc
+        except Exception:
+            pass
     # ---- дірки: де голос звучить, а слів нема (Whisper на співі часто «губить» шматки) — доперевіряємо цей шматок окремо
     sr = 16000; hop = 1600
     rms = np.sqrt(np.convolve(y.astype(np.float32) ** 2, np.ones(hop) / hop, "valid")[::hop]) if len(y) > hop else np.zeros(1)
@@ -581,6 +591,9 @@ def scan_video(src, dur, skip=(), job=None):
     if sw and shh and shh > sw: w, h = 180, 320    # вертикальне джерело не стискаємо
     else: w, h = 320, 180
     dense = 0 < dur <= 720
+    if not dense:  # довге відео: рівномірна сітка кадрів через швидкий пошук (працює з будь-яким кодеком: AV1/VP9/H.264)
+        out = _scan_grid(src, dur, skip, job, w, h)
+        if len(out) >= 20: return out
     pre = ["-skip_frame", "nokey"] if not dense else []
     vf = ("fps=1.5," if dense else "") + f"scale={w}:{h},showinfo"
     p = subprocess.Popen([ffmpeg(), "-v", "info", "-hide_banner", *pre, "-i", str(src), "-an", "-vf", vf,
@@ -611,6 +624,48 @@ def scan_video(src, dur, skip=(), job=None):
         q.pop("dark", None); q.pop("empty", None)
         if q.pop("hard", False): q["score"] -= 3.0
         out.append(q)
+    return out
+
+
+def _grab(src, t, w, h):
+    """Один кадр у момент t (швидкий пошук по ключовому кадру), зменшений до w×h. -> BGR або None"""
+    try:
+        r = subprocess.run([ffmpeg(), "-v", "error", "-ss", f"{t:.2f}", "-i", str(src), "-frames:v", "1", "-an",
+                            "-vf", f"scale={w}:{h}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"], capture_output=True, timeout=60)
+        if len(r.stdout) >= w * h * 3: return np.frombuffer(r.stdout[:w * h * 3], np.uint8).reshape(h, w, 3)
+    except Exception:
+        pass
+    return None
+
+
+def _scan_grid(src, dur, skip, job, w, h):
+    """Рівномірно 1 кадр на 3–5 с (до 450 точок) по всьому відео, паралельно, через швидкий пошук."""
+    from concurrent.futures import ThreadPoolExecutor
+    cv2 = _cv2()
+    step = max(3.0, dur / 450)
+    ts = [t for t in np.arange(dur * 0.02, dur * 0.985, step)
+          if not any(a - 1 <= t <= b + 1 for a, b in skip)]
+    done = [0]
+
+    def one(t):
+        if job is not None: job.check()
+        img = _grab(src, float(t), w, h)
+        done[0] += 1
+        if job is not None and done[0] % 25 == 0: job.pct = 60 + 1.5 * done[0] / max(1, len(ts))
+        if img is None: return None
+        q = frame_quality(img)
+        q["sig"] = [int(x) for x in cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2HSV), (4, 4), interpolation=cv2.INTER_AREA)[..., [0, 2]].ravel()]
+        q["t"] = float(t); q["score"] = float(q["score"])
+        q.pop("dark", None); q.pop("empty", None)
+        if q.pop("hard", False): q["score"] -= 3.0
+        return q
+    try:
+        from .core import perf
+        nw = max(2, perf()["render"] * 2)
+    except Exception:
+        nw = 4
+    with ThreadPoolExecutor(nw) as ex:
+        out = [q for q in ex.map(one, ts) if q]
     return out
 
 
@@ -1121,11 +1176,12 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
         cache = d / "vscan.json"
         try: vpool = _json.loads(cache.read_text()) if cache.exists() else None
         except Exception: vpool = None
-        if isinstance(vpool, dict) and vpool.get("v") == 5 and vpool.get("ar", "9:16") == ar_: vpool = vpool["items"]
+        if isinstance(vpool, dict) and vpool.get("v") == 6 and vpool.get("ar", "9:16") == ar_: vpool = vpool["items"]
         else:
             job.step("edit_scan", 60)
             vpool = scan_video(meta["video"], meta.get("duration") or 0, skip=(meta.get("info") or {}).get("skip") or [], job=job)
-            cache.write_text(_json.dumps({"v": 5, "ar": ar_, "items": vpool}))
+            job.log("edit_scanned", len(vpool))
+            cache.write_text(_json.dumps({"v": 6, "ar": ar_, "items": vpool}))
         for v in vpool:  # моменти, де щось відбувається за звуком/чатом, — трохи вище
             if any(abs(v["t"] - c["peak"]) < 4 for c in pool if c.get("final", 0) > 0.5): v["score"] += 0.6
         if len(vpool) < 8: vpool = None
