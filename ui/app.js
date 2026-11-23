@@ -1,5 +1,5 @@
 // StreamClipper UI. Стан: P (перевірене посилання), CH (канал), cur (поточна задача).
-const UIV='2.18.0';const $=id=>document.getElementById(id);
+const UIV='2.18.1';const $=id=>document.getElementById(id);
 let THFAIL=false,LANG='uk',SET={},P=null,CH=null,cur={},img=null,cam=[0,0,.25,.25],poll=null,WEDIT=false,WLIST=[],NOTIFIED={};
 const st={etm:'lyrics',egrade:'auto',estyle:'auto',ear:'4:3',emode:'normal',sspeed:'auto',mode:'best',layout:'blur',per:'30',typ:'archive',sp:'classic',ss:'m',spos:'auto',sw:'3',slang:'uk'};
 const t=(k,...a)=>{let s=(I18N[LANG]||I18N.uk)[k];if(s===undefined)s=I18N.uk[k]??k;return s.replace(/\{(\d)\}/g,(_,i)=>a[i]??'')};
@@ -95,7 +95,7 @@ function opts(){const kw=$('x_kw').checked?$('kw').value:'';
   censor:$('x_censor').checked,censor_mode:$('x_censor_mode').value,hook:$('x_hook').checked,zoom:$('x_zoom').checked,watermark:$('x_wm').checked,
   cover:$('x_cover').checked,denoise:$('x_denoise').checked,compile_min:st.mode==='compile'?Math.max(1,+$('cnt').value||8):8,teaser_sec:st.mode==='teaser'?Math.min(90,Math.max(10,+$('cnt').value||30)):30,
   edit_sec:st.mode==='edit'?Math.min(60,Math.max(5,+$('cnt').value||15)):15,music:EM?EM.path:null,music_start:$('emstart').value===''?null:+$('emstart').value,edit_textmode:st.etm,edit_text:$('etext').value,
-  edit_grade:st.egrade,edit_style:st.estyle,edit_ar:st.ear,edit_mode:st.emode,edit_ref:st.eref||null,edit_extra:[...document.querySelectorAll('#eextra input:checked')].map(x=>x.value),edit_export:$('eexport').checked,edit_loop:$('eloop').checked,edit_vocal_ramp:$('evramp').checked,nick:$('enick').value.trim(),edit_behind:$('ebehind').checked,edit_delogo:$('edelogo').checked,edit_mute:$('emute').checked,vclips:$('x_vclips').checked,history:$('x_hist').checked,
+  edit_grade:st.egrade,edit_style:st.estyle,edit_ar:st.ear,edit_mode:st.emode,edit_ref:st.eref||null,edit_extra:[...document.querySelectorAll('#eextra input:checked')].map(x=>x.value),edit_export:$('eexport').checked,edit_extra_urls:$('eurls').value.split(/\s+/).filter(x=>x.trim()),edit_loop:$('eloop').checked,edit_vocal_ramp:$('evramp').checked,nick:$('enick').value.trim(),edit_behind:$('ebehind').checked,edit_delogo:$('edelogo').checked,edit_mute:$('emute').checked,vclips:$('x_vclips').checked,history:$('x_hist').checked,
   gpu:$('x_gpu').checked,keywords:kw,sub_style:{preset:st.sp,size:st.ss,pos:st.spos,words:+st.sw,caps:$('scaps').checked,font:$('sfont').value}}}
 function plan(){if(!P)return;const i=P.info,o=opts(),live=['live','live_vod'].includes(i.kind);
   const dur=live?(o.live_minutes||120)*60+(i.duration||0):(i.duration||0),avg=(o.min_len+o.max_len)/2;let n,L=[],mb=0,min=0;const sp={base:.06,small:.13,medium:.35}[o.model]||.13;
@@ -332,5 +332,5 @@ function reuseOpts(){const o=EOPTS;if(!o)return;st.mode='edit';mark('mode','mode
   if(o.edit_sec)CNT.edit=o.edit_sec;$('cnt').value=o.edit_sec||15;PREVM='edit';$('enick').value=o.nick||'';$('etext').value=o.edit_text||'';$('etext').classList.toggle('hide',st.etm!=='custom');
   ['edit_behind:ebehind','edit_delogo:edelogo','edit_mute:emute','edit_loop:eloop','edit_vocal_ramp:evramp','edit_export:eexport'].forEach(x=>{const [k,id]=x.split(':');if(o[k]!==undefined)$(id).checked=!!o[k]});
   if(o.music){EM={path:o.music,name:o.music.split(/[\\/]/).pop().replace(/^[0-9a-f]{6}_/,''),dur:0};$('emname').textContent=EM.name;$('emstart').value=o._music_start??o.music_start??'';loadWave()}
-  st.eref=o.edit_ref||null;$('erefn').textContent=st.eref?t('e_ref_ok',st.eref.shot_len,t('es_'+st.eref.style),t('g_'+st.eref.grade)):'';
+  $('eurls').value=(o.edit_extra_urls||[]).join('\n');st.eref=o.edit_ref||null;$('erefn').textContent=st.eref?t('e_ref_ok',st.eref.shot_len,t('es_'+st.eref.style),t('g_'+st.eref.grade)):'';
   modeUI();plan();tab('cut');window.scrollTo({top:0,behavior:'smooth'})}

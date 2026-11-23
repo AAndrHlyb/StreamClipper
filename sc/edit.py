@@ -1773,9 +1773,18 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
             base = (k_ + 1) * 1e6
             extras.append((base, xv, xm.get("video_offset", 0.0)))
             vpool = (vpool or []) + [dict(c, t=c["t"] + base) for c in xp]
-            job.log("edit_extra", Path(xv).parent.name, len(xp))
+            job.log("edit_extra", ((xm.get("info") or {}).get("title") or Path(xv).stem)[:40], len(xp))
         except Exception as e:
             print("extra source:", e)
+    if extras and vpool:  # вирівнюємо оцінки між джерелами, щоб кадри брались з усіх роликів, а не лише з «яскравішого»
+        groups = {}
+        for c in vpool: groups.setdefault(int(c["t"] // 1e6), []).append(c)
+        p80 = {g: float(np.percentile([c["score"] for c in cs], 80)) for g, cs in groups.items()
+               if len(cs) >= 5 and sum(1 for c in cs if c.get("face")) >= 0.2 * len(cs)}  # лише джерела, де справді є людина
+        ref80 = max(p80.values()) if p80 else 0
+        for g, cs in groups.items():
+            if g in p80:
+                for c in cs: c["score"] += min(3.0, ref80 - p80[g])
     if vpool and o.get("edit_ban"):  # кадри, які ти забракував
         ban = [float(x) for x in o["edit_ban"]]
         vpool = [c for c in vpool if all(abs(c["t"] - b_) > 2.0 for b_ in ban)] or vpool

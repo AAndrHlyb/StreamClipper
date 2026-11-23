@@ -289,8 +289,35 @@ def _edit_pool(meta, clips):
     return pool
 
 
+def _extra_sources(job, d, o):
+    """Посилання на інші ролики (або шляхи до файлів) → качаємо відео в d/x_<hash>/ і додаємо як друге джерело кадрів."""
+    import hashlib
+    urls = [u.strip() for u in (o.get("edit_extra_urls") or []) if u and u.strip()]
+    dirs = list(o.get("edit_extra") or [])
+    for k, u in enumerate(urls[:5]):
+        xd = d / ("x_" + hashlib.sha1(u.encode("utf-8")).hexdigest()[:8]); xd.mkdir(parents=True, exist_ok=True)
+        xm = jload(xd / "meta.json", {}) or {}
+        if not (xm.get("video") and Path(xm["video"]).exists()):
+            try:
+                if Path(u).exists():
+                    xm = {"video": str(Path(u).resolve()), "info": {"title": Path(u).stem}}
+                else:
+                    job.log("edit_extra_dl", k + 1, len(urls))
+                    xm = {"audios": [], "info": {"title": u}}
+                    _download(job, xd, xm, u, True, 0, 0, 52 + 6 * k / len(urls), 52 + 6 * (k + 1) / len(urls))
+                xm["duration"] = dur_of(xm["video"]) or 0
+                jsave(xd / "meta.json", xm)
+            except Cancelled:
+                raise
+            except Exception as e:
+                job.log("edit_extra_err", u[:60], str(e)[:80]); continue
+        if str(xd) not in dirs: dirs.append(str(xd))
+    o["edit_extra"] = dirs
+
+
 def _edit_only(job, d, meta, o, clips, seed=1, name="edit_9x16.mp4"):
     from . import edit as E
+    if o.get("edit_extra_urls"): _extra_sources(job, d, o)
     pool = _edit_pool(meta, clips or []) if clips is not None else jload(d / "edit_pool.json", [])
     if not pool: raise RuntimeError("no_more")
     jsave(d / "edit_pool.json", pool)
