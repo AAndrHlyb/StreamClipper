@@ -313,7 +313,7 @@ def _shot_quality(src, t, span):
     qs = [frame_quality(f) for f in fr]
     q = min(x["score"] for x in qs)
     if any(x["hard"] for x in qs): q = min(q, -5.0)  # титри/субтитри/темрява/порожнеча/змаз — ніколи
-    if sum(1 for x in qs if x["face"]) < 2: q -= 2.5  # людини майже нема в самому шоті (гра, предмети, стрибок не туди)
+    if sum(1 for x in qs if x["face"]) < 2: q = min(q - 2.5, -3.0)  # людини майже нема в самому шоті (гра, підлога, стеля) — під заміну
     ga = cv2.resize(cv2.cvtColor(fr[0], cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
     gb = cv2.resize(cv2.cvtColor(fr[2], cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
     mot = float(np.abs(ga - gb).mean())
@@ -633,8 +633,8 @@ def frame_quality(img):
     sc -= 1.5 if hot > 0.45 else 0
     sc -= 2.4 * min(tl, 3) + 30 * ta                 # вшиті написи/субтитри джерела в едіті — це сміття
     if sharp < 30: sc -= 1.5
-    hard = dark > 0.45 or hot > 0.5 or tl >= 1 or ent < 4.3 or edges < 0.012 or sharp < 18 or sb >= 3
-    return {"hard": bool(hard), "score": sc, "face": bool(in_crop and (fw >= 0.04 or full)), "fs": round(fw * fw * ASPECT, 4) if in_crop else 0.0, "br": round(float(g.mean()) / 255, 3),
+    hard = dark > 0.45 or hot > 0.5 or tl >= 1 or ent < 4.3 or edges < 0.012 or sharp < 18 or sb >= 3 or colorful > 100  # >100 — гра/екран
+    return {"hard": bool(hard), "score": sc, "face": bool(in_crop and (fw >= 0.04 or full) and colorful <= 100), "fs": round(fw * fw * ASPECT, 4) if in_crop else 0.0, "br": round(float(g.mean()) / 255, 3),
             "sa": round(colorful / 40 - 1, 2), "txt": tl, "fw": round(fw, 3) if in_crop else 0.0, "full": bool(full), "dark": dark, "empty": ent < 4.3 or edges < 0.012}
 
 
@@ -1348,12 +1348,12 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
         cache = d / "vscan.json"
         try: vpool = _json.loads(cache.read_text()) if cache.exists() else None
         except Exception: vpool = None
-        if isinstance(vpool, dict) and vpool.get("v") == 10 and vpool.get("ar", "9:16") == ar_: vpool = vpool["items"]
+        if isinstance(vpool, dict) and vpool.get("v") == 11 and vpool.get("ar", "9:16") == ar_: vpool = vpool["items"]
         else:
             job.step("edit_scan", 60)
             vpool = scan_video(meta["video"], meta.get("duration") or 0, skip=(meta.get("info") or {}).get("skip") or [], job=job)
             job.log("edit_scanned", len(vpool))
-            cache.write_text(_json.dumps({"v": 10, "ar": ar_, "items": vpool}))
+            cache.write_text(_json.dumps({"v": 11, "ar": ar_, "items": vpool}))
         for v in vpool:  # моменти, де щось відбувається за звуком/чатом, — трохи вище
             if any(abs(v["t"] - c["peak"]) < 4 for c in pool if c.get("final", 0) > 0.5): v["score"] += 0.6
         if len(vpool) < 8: vpool = None
@@ -1392,8 +1392,8 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
             from collections import Counter
             top = [w_ for w_, _ in Counter(x.upper() for x in heroes_w).most_common(3)]
             for sh in shots:
-                if sh["a"] > L - 1.4 or not (sh["hard"] or sh.get("drop")): continue
-                if all(not (x["t0"] - 1.4 < sh["a"] < x["t1"] + 1.4) for x in ev):
+                if sh["a"] > L - 1.4: continue
+                if all(not (x["t0"] - 1.0 < sh["a"] < x["t1"] + 1.0) for x in ev):  # будь-яка склейка в «дірці» > 2 с
                     ev.append({"t0": sh["a"], "t1": min(L - 1.0, sh["a"] + 0.9), "txt": rnd.choice(top), "hero": True})
             ev.sort(key=lambda e: e["t0"])
     if tm != "none" and not sung and len(ev) < L / 2.2:  # пісні без слів — додаємо фрази стрімера з цих кадрів
