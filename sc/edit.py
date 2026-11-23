@@ -42,6 +42,9 @@ GRADES = {
     "warm": "eq=contrast=1.08:saturation=1.28:gamma=0.97,colorbalance=rs=.06:gs=.01:bs=-.06:rm=.04:bm=-.04",
     "cold": "eq=contrast=1.1:saturation=1.12,colorbalance=rs=-.05:bs=.07:rm=-.03:bm=.05",
     "punch": "eq=contrast=1.25:saturation=1.38:brightness=-0.02",
+    "teal": "eq=contrast=1.15:saturation=1.15,colorbalance=rs=-.08:gs=.02:bs=.10:rh=.10:gh=.03:bh=-.08",
+    "moody": "eq=contrast=1.18:saturation=0.85:gamma=0.92,colorbalance=bs=.05:bm=.03",
+    "fade": "eq=contrast=0.92:saturation=0.82:brightness=0.03,colorbalance=rs=.05:bs=-.03,curves=all='0/0.08 1/0.95'",
     "none": "",
 }
 ACCENTS = [(0, 229, 255), (60, 255, 110), (255, 90, 255), (60, 60, 255), (255, 200, 60)]  # BGR: жовтий, зелений, рожевий, червоний, блакитний
@@ -916,6 +919,11 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
         elif a > drop and d >= 0.55 and rnd.random() < 0.3: speed, ramp = 1.8, "velo"
         elif a > drop and d >= 0.5 and rnd.random() < 0.35: speed, ramp = 1.7, rnd.choice(["in", "out"])
         else: speed, ramp = (0.85 if a < drop else 1.15), "none"
+        wds = m.get("words") or []
+        if wds and not flurry and not is_drop and not before_drop:  # швидкість під вокал: протяжне слово — слоумо, скоромовка — швидше
+            inn = [w for w in wds if a - 0.05 <= w["s"] < b]
+            if d >= 0.45 and any(w["e"] - w["s"] >= 0.55 for w in inn): speed, ramp = 0.6, "none"
+            elif ramp == "none" and len(inn) / max(0.2, d) >= 3.5: speed = 1.3
         # ---- «режисер»: контекст шоту → найкращий перехід, образ і акцент
         pk = picks[i] if (video_pool and i < len(picks)) else {}
         sec = ("resolve" if a >= resolve - 0.01 else "drop" if is_drop else "pre" if before_drop else
@@ -1078,7 +1086,7 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
     cy, pb = H * 0.42, 0.0
     if person:
         cy, pb = text_spot(mask, head, rc, id(ev), H * {"behind": 0.2, "build": 0.26, "wide": 0.22, "line": 0.12, "brand": 0.32}.get(st, 0.15))
-        if st in ("line", "build"): pb = 0.0  # фразу з кількох слів не ховаємо — інакше зникає слово посередині
+        if st in ("line", "build", "karaoke"): pb = 0.0  # фразу з кількох слів не ховаємо — інакше зникає слово посередині
     pulse = 1 + 0.06 * beat_pulse
     if st == "behind":
         sz = fit_size(txt, FONT_BIG, W * 0.96, hi=560); spr = sprite(txt, sz, FONT_BIG, ev["fill"])
@@ -1238,6 +1246,59 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
                     blend(frame, warp(sp, 0.7 + 0.3 * e_), x + (sp.shape[1] - 8) / 2, y + 30 * (1 - min(1.0, q)), mask, pb, fade * min(1.0, q * 2))
                 x += sp.shape[1] - 8 + gapw
             k += len(r); y += lh
+    elif st == "karaoke":  # караоке: вся фраза видна одразу приглушеною, слово загоряється рівно тоді, коли його співають
+        words = ev.get("words") or [(w, ev["t0"]) for w in txt.split()]
+        f = FONT_WIDE
+        sz = fit_size(" ".join(w.upper() for w, _ in words), f, W * 0.88, hi=140)
+        rows = [words]
+        if sz < 70 and len(words) > 2:
+            half = (len(words) + 1) // 2; rows = [words[:half], words[half:]]
+            sz = min(fit_size(" ".join(w.upper() for w, _ in r), f, W * 0.88, hi=140) for r in rows)
+        from PIL import ImageFont
+        gapw = ImageFont.truetype(str(_font(f, txt)), sz).getlength(" ")
+        lh = sz * 1.1; y = cy - (len(rows) - 1) * lh / 2
+        flat = [tw for _, tw in words] + [ev["t1"]]
+        k_ = 0
+        for r in rows:
+            sprs = []
+            for n_, (w, tw) in enumerate(r):
+                nxt_t = flat[k_ + n_ + 1]
+                state = 2 if tw <= t < nxt_t else (1 if t >= nxt_t else 0)  # 2 — зараз співають, 1 — вже, 0 — ще ні
+                col = acc if state == 2 else (white if state == 1 else (150, 150, 150))
+                sprs.append((sprite(w.upper(), sz, f, col), state, tw))
+            tw_all = sum(sp.shape[1] - 8 for sp, _, _ in sprs) + gapw * (len(r) - 1); x = W / 2 - tw_all / 2
+            for sp, state, tw in sprs:
+                sc_ = 1.0
+                if state == 2: sc_ = 1.0 + 0.16 * (1 - back_ease(min(1.0, (t - tw) / 0.14)) + 0.0) + 0.04 * beat_pulse
+                al = fade * (0.55 if state == 0 else 1.0) * min(1.0, dt / 0.1 + 0.2)
+                if state == 2: blend(frame, warp(glow(sp, acc, 14), sc_), x + (sp.shape[1] - 8) / 2, y, None, False, 0.45 * fade)
+                blend(frame, warp(sp, sc_), x + (sp.shape[1] - 8) / 2, y - (10 if state == 2 else 0), mask, pb, al)
+                x += sp.shape[1] - 8 + gapw
+            k_ += len(r); y += lh
+    elif st == "glitch":  # глітч: слово розрізане на смуги, що зсуваються, червоно-блакитний розшар; на вході й виході — розпад
+        sz = fit_size(txt, FONT_BIG, W * 0.92, hi=420); spr = sprite(txt, sz, FONT_BIG, ev["fill"])
+        amt = max(1 - min(1.0, dt / 0.2), max(0.0, (t - (ev["t1"] - 0.16)) / 0.16), 0.3 * beat_pulse)
+        rr = random.Random(int(t * 30) * 131 + len(txt))
+        off = int(5 + 38 * amt)
+        blend(frame, tint(spr, (60, 60, 255)), W / 2 - off, cy, mask, pb, 0.75 * fade)
+        blend(frame, tint(spr, (255, 255, 60)), W / 2 + off, cy, mask, pb, 0.75 * fade)
+        h = spr.shape[0]; nn = 7
+        for r_ in range(nn):
+            part = spr[r_ * h // nn:(r_ + 1) * h // nn]
+            if not part.shape[0]: continue
+            dxp = rr.uniform(-1, 1) * 110 * amt if rr.random() < 0.6 else 0
+            blend(frame, part, W / 2 + dxp, cy - h / 2 + (r_ + 0.5) * h / nn, mask, pb, fade)
+    elif st == "knock":  # відео всередині літер: величезне слово, кадр видно лише крізь букви
+        sz = fit_size(txt, FONT_BIG, W * 0.97, hi=900 if W < H else 700); spr = sprite(txt, sz, FONT_BIG, white)
+        s_ = 1.22 - 0.22 * ease(dt / 0.25)
+        a = warp(spr, s_)[..., 3].astype(np.float32) / 255
+        canvas = np.zeros((H, W), np.float32)
+        h_, w_ = a.shape; x0, y0 = int(W / 2 - w_ / 2), int(H * 0.45 - h_ / 2)
+        fx0, fy0, fx1, fy1 = max(0, x0), max(0, y0), min(W, x0 + w_), min(H, y0 + h_)
+        if fx1 > fx0 and fy1 > fy0: canvas[fy0:fy1, fx0:fx1] = a[fy0 - y0:fy1 - y0, fx0 - x0:fx1 - x0]
+        mix = 1 - fade * (1 - (0.08 + 0.92 * canvas))
+        frame[:] = (frame * mix[..., None]).astype(np.uint8)
+        blend(frame, warp(sprite(txt, sz, FONT_BIG, acc, stroke=4, outline_only=True), s_), W / 2, H * 0.45, None, False, 0.8 * fade)
     elif st == "wide":  # широке слово вгорі з «відлунням» нижче (1MMS / 1MMS)
         sz = fit_size(txt, FONT_WIDE, W * 0.94, hi=240); spr = sprite(txt, sz, FONT_WIDE, white)
         e_ = ease(dt / 0.2); gap = spr.shape[0] * 0.92
@@ -1294,10 +1355,11 @@ def style_events(ev, rnd, behind_ok, prefer=None):
         if s == "wide" and len(e["txt"]) > 8: s = "behind"
         if e.get("words"):
             r_ = rnd.random()
-            s = "kinetic" if r_ < 0.6 else ("line" if (r_ < 0.85 or len(e["words"]) >= 3) else "build")
+            s = "kinetic" if r_ < 0.45 else ("karaoke" if r_ < 0.7 and len(e["words"]) >= 2 else ("line" if (r_ < 0.9 or len(e["words"]) >= 3) else "build"))
         if e.get("brand"): s = "brand"
         if e.get("hero"):  # ключове слово — великим «авторським» стилем, по черзі
-            s = ("behind", "rise", "deep", "slam", "wide")[k % 5] if behind_ok else ("slam", "deep", "rgb", "wide")[k % 4]
+            s = ("behind", "rise", "knock", "deep", "slam", "glitch", "wide")[k % 7] if behind_ok else ("slam", "deep", "knock", "rgb", "glitch", "wide")[k % 6]
+            if s == "knock" and len(e["txt"]) > 7: s = "slam"
             if s == "wide" and len(e["txt"]) > 8: s = "behind"
         e["style"] = s
         e["color"] = acc_col
@@ -1341,6 +1403,37 @@ def leak_layer(rnd):
 
 
 # ------------------------------------------------------------------ головна функція
+GENRE_STYLE = {"phonk": ["neon", "hype"], "trap": ["hype", "noir"], "pop": ["pop", "hype"], "slow": "cinema", "edm": ["neon", "pop"]}
+
+
+def track_profile(m):
+    """Грубий «жанр» і настрій треку з темпу, басу, яскравості, щільності ударів. -> (genre, grade)"""
+    bpm = 60 / max(0.2, m["period"])
+    if bpm < 80: bpm *= 2  # половинний темп
+    mean = lambda k: float(np.mean(m.get(k) or [0.5]))
+    en, br, bass, busy = mean("energy"), mean("bright"), mean("bass"), mean("busy")
+    if en < 0.42 and busy < 0.45: genre = "slow"
+    elif bass > 0.55 and 125 <= bpm <= 175 and br < 0.5: genre = "phonk"
+    elif bass > 0.5 and busy >= 0.5: genre = "trap"
+    elif br >= 0.55 and bass < 0.5 and bpm >= 118: genre = "edm"
+    else: genre = "pop"
+    mood = {"slow": "fade", "phonk": "teal", "trap": "moody", "edm": "punch", "pop": "warm"}[genre]
+    return genre, mood
+
+
+def apply_lyrics_fix(words, text):
+    """Користувач виправив текст пісні: розкладаємо його слова на ті самі часові мітки (рівномірно, якщо кількість різна)."""
+    import re as _re
+    new = [w for w in _re.findall(r"[\w'’&-]+", text or "")]
+    if not new: return words
+    if not words: return []
+    if len(new) == len(words):
+        return [dict(w, w=nw) for w, nw in zip(words, new)]
+    s0, s1 = words[0]["s"], words[-1]["e"]
+    step = (s1 - s0) / len(new)
+    return [{"w": nw, "s": s0 + k * step, "e": s0 + (k + 0.9) * step, "p": 1.0} for k, nw in enumerate(new)]
+
+
 def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     import json as _json
     cv2 = _cv2()
@@ -1349,6 +1442,15 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     ar_ = o.get("edit_ar") or "4:3"; set_ar(ar_)
     music = o.get("music"); mlen = music_dur(music) if music else 0
     want = max(5.0, float(o.get("edit_sec") or 15))
+    if o.get("edit_mode") == "drop" and mlen > 12 and o.get("music_start") in (None, "", "auto"):
+        # «інтро + дроп»: короткий едіт 9 с — 3.5 с тихого розгону і вибух на дропі
+        want = 9.0
+        try:
+            full = analyze_music(music, 0.0, min(mlen - 1, 240.0))
+            dr = full["drop"] or best_segment(music, 9.0, mlen) + 3.5
+        except Exception:
+            dr = best_segment(music, 9.0, mlen) + 3.5
+        o["music_start"] = max(0.0, min(mlen - want - 0.3, dr - 3.5))
     if o.get("music_start") in (None, "", "auto"):  # авто: найсильніший шматок треку (приспів / дроп)
         start = best_segment(music, min(want, max(5.0, mlen - 0.5)), mlen) if mlen > want + 2 else 0.0
         job.log("edit_music_start", round(start, 1))
@@ -1382,12 +1484,33 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
         for v in vpool:  # моменти, де щось відбувається за звуком/чатом, — трохи вище
             if any(abs(v["t"] - c["peak"]) < 4 for c in pool if c.get("final", 0) > 0.5): v["score"] += 0.6
         if len(vpool) < 8: vpool = None
-    sname = o.get("edit_style") if o.get("edit_style") in FX.STYLES else rnd.choice(list(FX.STYLES))
+    genre, mood = track_profile(m)
+    job.log("edit_genre", genre)
+    if o.get("edit_style") in FX.STYLES: sname = o["edit_style"]
+    elif o.get("edit_mode") == "cinema": sname = "cinema"
+    else: sname = GENRE_STYLE.get(genre) or rnd.choice(list(FX.STYLES))
+    if isinstance(sname, list): sname = rnd.choice(sname)
     style = FX.STYLES[sname]
     o = dict(o)
-    if (o.get("edit_grade") or "auto") == "auto": o["edit_grade"] = rnd.choice(style["grade"])
+    if (o.get("edit_grade") or "auto") == "auto": o["edit_grade"] = mood  # цвет под настроение трека
+    if o.get("edit_mode") == "cinema" and o["edit_grade"] in ("punch",): o["edit_grade"] = "teal"
     job.log("edit_style", sname)
+    tm = o.get("edit_textmode") or "lyrics"
+    words = []
+    if tm == "lyrics":
+        job.step("edit_lyrics", 62)
+        try: words = lyrics(music, start, L, o, job)
+        except Exception as e: print("lyrics:", e); words = []
+        if o.get("lyrics_fix"):  # ручная правка текста песни: те же тайминги, свои слова
+            words = apply_lyrics_fix(words, o["lyrics_fix"])
+    m["words"] = words if o.get("edit_vocal_ramp", True) else []
     shots = plan_shots(m, L, pool, rnd, vpool, style)
+    if o.get("edit_mode") == "cinema":  # кіно: без різких ударів, переходи плавні
+        for sh in shots:
+            if sh.get("hit") in ("flash", "invert", "chroma", "streak"): sh["hit"] = None
+            if sh["fx"] in ("glitch", "pixel", "spin", "whip"): sh["fx"] = rnd.choice(["dip", "zoom", "slide", "mask"])
+    for sh in shots:  # іскри/пил у повітрі на дропі й піках
+        sh["sparks"] = sh.get("sec") in ("drop", "peak") and sname in ("hype", "neon", "cinema") and rnd.random() < 0.45
     if vpool and meta.get("video"):
         try:
             nf = verify_shots(shots, vpool, meta["video"], meta.get("video_offset", 0.0), job)
@@ -1397,10 +1520,8 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     print("edit plan:", " | ".join(f'{sh["sec"][:3]} {sh["fx"]}{"+" + sh["hit"] if sh.get("hit") else ""}{"/" + sh["look"] if sh.get("look") else ""}'
                                    f'{" BLACK" if sh.get("blackout") else ""}' for sh in shots), flush=True)
     # ---- текст
-    tm = o.get("edit_textmode") or "lyrics"
     ev = []; sung = False
     if tm == "lyrics":
-        job.step("edit_lyrics", 62); words = lyrics(music, start, L, o, job)
         if len(words) >= 3: ev = text_events(m, o, L, rnd, words); sung = True
         else: job.log("edit_nolyrics")
     elif tm == "custom":
@@ -1525,7 +1646,9 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 traceback.print_exc()
             return fallback
     rig = FX.CamRig(rnd, energy=1.15 if sname in ("hype", "neon") else (0.75 if sname == "cinema" else 1.0))
-    bptr = hptr = 0; last_head = None; cam_prev = None
+    bptr = hptr = 0; last_head = None; cam_prev = None; last_mask = None; first_fr = None
+    loop_end = bool(o.get("edit_loop", True))
+    if loop_end: endc = None  # луп: кінець плавно переходить у перший кадр — замість титру з ніком
     try:
         for i, (sh, pr) in enumerate(zip(shots, parts)):
             job.check()
@@ -1534,7 +1657,9 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
             if seg: seg.reset()
             nxt = shots[i + 1] if i + 1 < len(shots) else None
             leak = leak_layer(rnd) if rnd.random() < 0.2 else None
-            sst = {"prev_bg": prev}; ev_acc = ACCENTS[i % len(ACCENTS)]
+            sst = {"prev_bg": prev, "pm": last_mask}; ev_acc = ACCENTS[i % len(ACCENTS)]
+            if sh["fx"] == "mask" and last_mask is None: sh["fx"] = "slide"
+            nfz = min(int(0.42 * FPS), pr["n"] // 2) if sh.get("hit") == "freeze" else 0
             cur_idx, cur = -1, None
             for j in range(pr["n"]):
                 want = ramp_index(j, pr["n"], pr["nsrc"], sh["ramp"]) if sh["ramp"] != "none" else j
@@ -1543,6 +1668,9 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                     if len(buf) < W * H * 3: break
                     cur = np.frombuffer(buf, np.uint8).reshape(H, W, 3); cur_idx += 1
                 fr = cur.copy() if cur is not None else (prev.copy() if prev is not None else np.zeros((H, W, 3), np.uint8))
+                if nfz:  # стоп-кадр: тримаємо перший кадр шоту
+                    if j == 0: sst["fz"] = fr.copy()
+                    elif j < nfz and "fz" in sst: fr = sst["fz"].copy()
                 t = fi / FPS
                 # ---- жива камера: пружина зуму на кожну долю (з перельотом), «травма»-тряска на ударах, ручний дрейф,
                 # слідкування за людиною (FX.CamRig)
@@ -1582,7 +1710,12 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 if nfx == "crash" and tail < 6:  # «крешзум»: камера влітає в обличчя/темну точку — і звідти наступний кадр
                     q = (6 - tail) / 6; z *= 1 + 3.2 * q ** 2.4; blur = max(blur, 0.14 * q)
                     if last_head is not None: zc = (last_head["x"], last_head["cy"] + 40)
+                if nfx == "eye" and tail < 7 and last_head is not None:  # влітаємо в око — і з темряви зіниці наступний кадр
+                    q = (7 - tail) / 7; z *= 1 + 5.5 * q ** 2.6; blur = max(blur, 0.12 * q)
+                    hh = max(40.0, last_head["cy"] - last_head["top"])
+                    zc = (last_head["x"] + 0.32 * hh * sh.get("dir", 1), last_head["top"] + 1.25 * hh)
                 fr = safe("zoom", lambda: zoom_frame(fr, z, ang, dx, dy, zc[0], zc[1]), fr)
+                if nfx == "eye" and tail < 3: fr = (fr * (tail / 3) ** 1.5).astype(np.uint8)
                 if cam_prev is not None and j > 0 and not hblur:  # змаз руху від швидкості камери
                     vx, vy = dx - cam_prev[0], dy - cam_prev[1]
                     vz = (z - cam_prev[2]) * W * 0.5
@@ -1601,6 +1734,12 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 if nfx == "spin" and tail < 3: fr = safe("spin", lambda: FX.tr_spin(fr, (3 - tail) / 3, 1), fr)
                 if fx == "spin" and j < 3: fr = safe("spin", lambda: FX.tr_spin(fr, 1 - j / 3, -1), fr)
                 if prev is not None and fx == "iris" and j < 6: fr = safe("iris", lambda: FX.tr_iris(prev, fr, (j + 1) / 6), fr)
+                if fx == "eye" and j < 7: fr = safe("eye", lambda: FX.tr_iris(np.zeros_like(fr), fr, ease((j + 1) / 7)), fr)
+                if prev is not None and fx == "mask":
+                    K = max(8, min(14, int(pr["n"] * 0.5)))
+                    if j < K:
+                        if "mold" not in sst: sst["mold"] = prev.copy()
+                        fr = safe("mask", lambda: FX.tr_mask(sst["mold"], fr, sst, sst["pm"], ease((j + 1) / K)), fr)
                 if fx == "dip" and j < 7: fr = (fr * ((j + 1) / 8)).astype(np.uint8)
                 if nfx == "dip" and tail < 5: fr = (fr * ((tail + 1) / 6)).astype(np.uint8)
                 if prev is not None and fx in ("slide", "splitin", "strips", "crash"):
@@ -1626,6 +1765,7 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 head = safe("head", lambda: head_of(mask), None) if mask is not None else None
                 last_head = head
                 lt = j / FPS; dshot = pr["n"] / FPS
+                sst["bp"] = bp
                 if sh.get("look"):
                     fr = safe("look_" + sh["look"], lambda: FX.LOOKS[sh["look"]](fr, mask if head else None, head, lt, dshot, sst, ev_acc), fr)
                 if sh.get("hit") in ("silhouette", "invert") and j < 4:
@@ -1638,6 +1778,13 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                     fr = safe("burn", lambda: FX.hit_burn(fr, (1.0, 0.9, 0.7, 0.5, 0.32, 0.18, 0.08)[j] * (0.85 + 0.3 * rnd.random()), i), fr)
                 if sh.get("hit") == "streak" and j < 5:
                     fr = safe("streak", lambda: FX.hit_streak(fr, (1.0, 0.8, 0.55, 0.3, 0.12)[j], ev_acc, i), fr)
+                if nfz and j < nfz + 3:
+                    qf = 1.0 if j < nfz else (nfz + 3 - j) / 4
+                    fr = safe("freeze", lambda: FX.hit_freeze(fr, mask if head else None, qf, ev_acc), fr)
+                if sh.get("hit") == "flare" and j < 7:
+                    fr = safe("flare", lambda: FX.hit_flare(fr, (1.0, 0.85, 0.65, 0.45, 0.3, 0.15, 0.06)[j], ev_acc), fr)
+                if sh.get("sparks"): fr = safe("sparks", lambda: FX.sparks(fr, t, i, 0.75, ev_acc), fr)
+                if sname == "cinema" or o.get("edit_mode") == "cinema": fr = safe("film", lambda: FX.film(fr, t), fr)
                 if sh.get("hit") == "chroma" and j < 4:
                     fr = safe("chroma", lambda: FX.hit_chroma(fr, (1.0, 0.7, 0.4, 0.15)[j]), fr)
                 if sh.get("blackout"):
@@ -1653,11 +1800,15 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                     q = (t - (T - 0.9)) / 0.9
                     fr = (fr * max(0.0, 1 - q * 2.2)).astype(np.uint8)
                     safe("end", lambda: blend(fr, warp(endc, 1.12 - 0.12 * ease(q * 2)), W / 2, H / 2, None, False, min(1.0, q * 4)), None)
+                elif loop_end and first_fr is not None and t > T - 0.42:  # луп: кінець наїжджає першим кадром
+                    qv, vel = FX.slide_curve(int((t - (T - 0.42)) * FPS), int(0.42 * FPS))
+                    fr = safe("loop", lambda: FX.tr_slide(fr, first_fr, qv, "up", vel), fr)
                 elif t > T - 0.4:
                     fr = (fr * max(0.0, (T - t) / 0.4)).astype(np.uint8)
                 if not isinstance(fr, np.ndarray) or fr.shape != (H, W, 3): fr = prev if prev is not None else np.zeros((H, W, 3), np.uint8)
                 fr = np.ascontiguousarray(fr, np.uint8)
-                pe.stdin.write(fr.tobytes()); fi += 1; prev = fr
+                pe.stdin.write(fr.tobytes()); fi += 1; prev = fr; last_mask = mask if head is not None else None
+                if first_fr is None: first_fr = fr.copy()
                 if fi % 15 == 0: job.pct = 78 + 20 * fi / nfr_total; job.sub = f"{fi}/{nfr_total}"
             pd.stdout.close(); pd.wait()
         pe.stdin.close()

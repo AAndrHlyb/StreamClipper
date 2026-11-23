@@ -811,3 +811,211 @@ LOOKS["halftone"] = look_halftone
 LOOK_RULES["halftone"] = lambda c: 0.35 + 0.35 * c["face"] + 0.3 * _ON(c, "build", "peak") + 0.2 * c["busy"]
 HIT_RULES["burn"] = lambda c: 0.4 + 0.3 * _ON(c, "intro", "build", "drop") + 0.2 * (1 - c["br"])
 
+
+
+# ================================================================== 2.17: стоп-кадр, клони, аура, спліт, іскри, маска-перехід, кіно
+def _fm(m):
+    """Маска (половинна) → повна, float32 (H, W)."""
+    cv2 = _cv2()
+    return cv2.resize(m, (W, H), interpolation=cv2.INTER_LINEAR)
+
+
+def hit_freeze(fr, m, q, acc):
+    """Стоп-кадр як у едітах: фон темніє й сіріє, людина — з товстою білою обводкою і тонкою кольоровою зовні."""
+    if m is None or q <= 0: return fr
+    cv2 = _cv2()
+    mm = _fm(m); mb = (mm > 0.5).astype(np.uint8)
+    k1, k2 = int(9 + 5 * q), int(17 + 7 * q)
+    d1 = cv2.dilate(mb, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k1 + 1, 2 * k1 + 1)))
+    d2 = cv2.dilate(mb, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k2 + 1, 2 * k2 + 1)))
+    f = fr.astype(np.float32)
+    g = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY).astype(np.float32)[..., None]
+    bg = (f * 0.3 + g * 0.7) * (1 - 0.5 * q)
+    M = mm[..., None]
+    out = bg * (1 - M) + f * M
+    ring1 = ((d1 > 0) & (mb == 0))[..., None].astype(np.float32)
+    ring2 = ((d2 > 0) & (d1 == 0))[..., None].astype(np.float32)
+    out = out * (1 - ring1 * q) + 255 * ring1 * q
+    out = out * (1 - ring2 * q) + np.array(acc, np.float32) * ring2 * q
+    sh = cv2.GaussianBlur(d2.astype(np.float32), (0, 0), 18)[..., None]  # м'яка тінь під наліпкою
+    out = out * (1 - 0.35 * q * sh * (1 - (d2[..., None] > 0)))
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def look_clones(fr, m, head, lt, d, st, acc):
+    """Клони: та сама людина ще двічі в кадрі, з затримкою в часі (з'являються по черзі)."""
+    hist = st.setdefault("clones", [])
+    if m is None: return fr
+    cv2 = _cv2()
+    M = _fm(m)[..., None]
+    hist.append((fr.copy(), M))
+    if len(hist) > 14: hist.pop(0)
+    out = fr.astype(np.float32)
+    off = W * (0.26 if W < H else 0.22)
+    for n, (lag, sx) in enumerate(((7, -1), (13, 1))):
+        if len(hist) <= lag: continue
+        q = ease_out((lt - 0.08 - n * 0.12) / 0.18)
+        if q <= 0: continue
+        img, MM = hist[-1 - lag]
+        T = np.float32([[1, 0, sx * off * q], [0, 1, 0]])
+        ci = cv2.warpAffine(img, T, (W, H), borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
+        cm = cv2.warpAffine(MM[..., 0], T, (W, H))[..., None]
+        a = cm * (0.92 - 0.12 * n) * q * (1 - M)  # клон — позаду справжньої людини
+        out = out * (1 - a) + ci * a
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def look_aura(fr, m, head, lt, d, st, acc):
+    """Аура: кольорове сяйво навколо людини пульсує в такт басу, фон трохи темніший."""
+    if m is None: return fr
+    cv2 = _cv2()
+    mm = _fm(m)
+    bp = float(st.get("bp", 0.0))
+    halo = cv2.GaussianBlur(cv2.dilate((mm > 0.5).astype(np.uint8), np.ones((15, 15), np.uint8)).astype(np.float32), (0, 0), 26)
+    halo = (np.clip(halo * 1.6, 0, 1) * (1 - mm))[..., None]
+    k = ease_out(lt / 0.15) * (0.55 + 0.75 * bp)
+    out = fr.astype(np.float32) * (1 - 0.18 * (1 - mm[..., None]))
+    out = out + np.array(acc, np.float32) * halo * k
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def look_split(fr, m, head, lt, d, st, acc):
+    """Спліт-скрін: кадр ділиться на 3 панелі (у вертикалі — смуги, у горизонталі — колонки),
+    кожна — той самий момент з затримкою, з'являються по черзі в ритм."""
+    cv2 = _cv2()
+    hist = st.setdefault("split", [])
+    hist.append(fr.copy())
+    if len(hist) > 12: hist.pop(0)
+    out = fr.copy()
+    vert = W < H * 0.9
+    n = 3; gap = 8
+    cy = head["cy"] if head else H * 0.42; cx = head["x"] if head else W / 2
+    for k in range(n):
+        q = ease_out((lt - k * 0.1) / 0.14)
+        if q <= 0: continue
+        src = hist[-1 - min(len(hist) - 1, k * 5)]
+        if vert:
+            ph = H // n; y0 = k * ph
+            sc = 1.0 + 0.15 * k
+            cw2, ch2 = int(W / sc), int(ph / sc)
+            x0 = int(min(max(0, cx - cw2 / 2), W - cw2)); yc = int(min(max(0, cy - ch2 / 2), H - ch2))
+            tile = cv2.resize(src[yc:yc + ch2, x0:x0 + cw2], (W, ph))
+            if k == 1: tile = tile[:, ::-1]
+            sl = int((1 - q) * W) * (1 if k % 2 else -1)
+            T = np.float32([[1, 0, sl], [0, 1, 0]])
+            tile = cv2.warpAffine(tile, T, (W, ph), borderMode=cv2.BORDER_CONSTANT)
+            out[y0:y0 + ph] = tile
+            if k: out[y0:y0 + gap // 2 + 2] = 255
+        else:
+            pw = W // n; x0p = k * pw
+            sc = 1.0 + 0.15 * k
+            cw2, ch2 = int(pw / sc), int(H / sc)
+            x0 = int(min(max(0, cx - cw2 / 2), W - cw2)); yc = int(min(max(0, cy - ch2 * 0.4), H - ch2))
+            tile = cv2.resize(src[yc:yc + ch2, x0:x0 + cw2], (pw, H))
+            if k == 1: tile = tile[:, ::-1]
+            sl = int((1 - q) * H) * (1 if k % 2 else -1)
+            T = np.float32([[1, 0, 0], [0, 1, sl]])
+            tile = cv2.warpAffine(tile, T, (pw, H), borderMode=cv2.BORDER_CONSTANT)
+            out[:, x0p:x0p + pw] = tile
+            if k: out[:, x0p:x0p + gap // 2 + 2] = 255
+    return out
+
+
+_SPK = {}
+
+
+def sparks(fr, t, seed, q, acc):
+    """Пил/іскри в повітрі: дрібні світні частинки повільно летять угору й мерехтять (адитивно)."""
+    if q <= 0: return fr
+    cv2 = _cv2()
+    if seed not in _SPK:
+        r = np.random.default_rng(seed + 7)
+        n = 70
+        _SPK[seed] = (r.uniform(0, 1, n), r.uniform(0, 1, n), r.uniform(0.03, 0.12, n), r.uniform(1.5, 4.5, n), r.uniform(0, 6.28, n))
+    x, y, v, s, ph = _SPK[seed]
+    layer = np.zeros((H // 2, W // 2), np.float32)
+    xs = ((x + 0.02 * np.sin(t * 1.3 + ph)) % 1) * (W // 2)
+    ys = ((y - v * t) % 1) * (H // 2)
+    br = 0.5 + 0.5 * np.sin(t * 5 + ph * 3)
+    for xi, yi, si, bi in zip(xs, ys, s, br):
+        cv2.circle(layer, (int(xi), int(yi)), max(1, int(si)), float(bi), -1, cv2.LINE_AA)
+    layer = cv2.GaussianBlur(layer, (0, 0), 1.6) * 1.8 + cv2.GaussianBlur(layer, (0, 0), 7) * 1.2
+    layer = cv2.resize(layer, (W, H))[..., None]
+    col = np.array(acc, np.float32) * 0.5 + 127
+    return np.clip(fr.astype(np.float32) + layer * col * q, 0, 255).astype(np.uint8)
+
+
+def hit_flare(fr, q, acc):
+    """Анаморфний блік на найяскравішій точці кадру + «привиди» лінзи до центру."""
+    if q <= 0: return fr
+    cv2 = _cv2()
+    g = cv2.GaussianBlur(cv2.cvtColor(cv2.resize(fr, (W // 8, H // 8)), cv2.COLOR_BGR2GRAY), (0, 0), 3)
+    _, _, _, (px, py) = cv2.minMaxLoc(g)
+    px, py = px * 8, py * 8
+    layer = np.zeros((H, W), np.float32)
+    cv2.ellipse(layer, (int(px), int(py)), (int(W * 0.7), 6), 0, 0, 360, 1.0, -1)
+    layer = cv2.GaussianBlur(layer, (0, 0), 9)
+    cv2.circle(layer, (int(px), int(py)), 34, 1.0, -1); layer = cv2.GaussianBlur(layer, (0, 0), 6)
+    ghost = np.zeros((H, W), np.float32)
+    for f, r in ((0.5, 40), (0.85, 22), (1.3, 60)):
+        gx, gy = W / 2 + (W / 2 - px) * f, H / 2 + (H / 2 - py) * f
+        cv2.circle(ghost, (int(gx), int(gy)), r, 0.35, -1)
+    ghost = cv2.GaussianBlur(ghost, (0, 0), 8)
+    col = (np.array(acc, np.float32) * 0.4 + np.array([255, 220, 180], np.float32) * 0.6)
+    out = fr.astype(np.float32) + (layer[..., None] * 1.3 + ghost[..., None]) * col * q
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def tr_mask(prev, fr, st, pm, q):
+    """Новий кадр з'являється ВСЕРЕДИНІ силуету людини з попереднього шоту і розростається на весь екран."""
+    if prev is None or pm is None: return fr
+    cv2 = _cv2()
+    if "mdist" not in st:
+        mb = (_fm(pm) > 0.5).astype(np.uint8)
+        st["mdist"] = cv2.distanceTransform(1 - mb, cv2.DIST_L2, 5)
+    R = (q ** 2.2) * math.hypot(W, H) * 0.9
+    M = np.clip((R + 4 - st["mdist"]) / 30.0, 0, 1)[..., None]
+    edge = np.clip(1 - np.abs(st["mdist"] - R) / 14.0, 0, 1)[..., None] * (1 - q)
+    out = prev.astype(np.float32) * (1 - M) + fr.astype(np.float32) * M + 255 * edge * 0.9
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+_GR = {}
+
+
+def film(fr, t, letter=True, grain=0.035):
+    """Кіно-режим: шторки 2.39:1 (у вертикалі — тонші), плівкове зерно, легкий «тремтливий» кадр."""
+    cv2 = _cv2()
+    k = int(t * 24) % 8
+    if k not in _GR:
+        r = np.random.default_rng(k)
+        _GR[k] = cv2.resize(r.normal(0, 1, (H // 3, W // 3)).astype(np.float32), (W, H))[..., None]
+    out = fr.astype(np.float32) + _GR[k] * 255 * grain
+    if letter:
+        bh = int(H * (0.5 - (W / 2.39) / H / 2)) if W > H else int(H * 0.075)
+        out[:bh] = 0; out[H - bh:] = 0
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+LOOKS.update({"clones": look_clones, "aura": look_aura, "split": look_split})
+PERSON_LOOKS |= {"clones", "aura"}
+LOOK_RULES.update({
+    "clones": lambda c: (0.8 if c["face"] else -2) + 0.5 * _ON(c, "build", "peak") + 0.3 * (c["d"] >= 0.6) - 0.6 * (c["d"] < 0.45),
+    "aura":   lambda c: (0.7 if c["face"] else -2) + 0.6 * c["bass"] + 0.3 * _ON(c, "drop", "peak"),
+    "split":  lambda c: 0.3 + 0.6 * c["busy"] + 0.5 * _ON(c, "peak") + 0.3 * (c["d"] >= 0.5) - 0.8 * (c["d"] < 0.4),
+})
+TRANS_RULES.update({
+    "mask": lambda c: (0.6 if c["face"] else -2) + 0.4 * _ON(c, "build", "peak", "resolve") + 0.2 * (c["d"] >= 0.5),
+    "eye":  lambda c: (0.45 if c["face"] else -2) + 0.5 * _ON(c, "build", "pre") + 0.2 * c["en"],
+})
+HIT_RULES.update({
+    "freeze": lambda c: (0.55 if c["face"] else -2) + 0.5 * _ON(c, "drop", "peak") * c["st"] + 0.3 * (c["d"] >= 0.6) - 0.9 * (c["d"] < 0.5),
+    "flare":  lambda c: 0.3 + 0.5 * c["br"] + 0.3 * _ON(c, "drop"),
+})
+for _s in STYLES.values():
+    _s["trans"] += ["mask", "eye"]
+STYLES["hype"]["looks"] += ["clones", "aura", "split"]
+STYLES["neon"]["looks"] += ["aura", "clones"]
+STYLES["pop"]["looks"] += ["split", "clones"]
+STYLES["noir"]["looks"] += ["clones"]
+STYLES["cinema"]["looks"] += ["aura"]
