@@ -556,6 +556,27 @@ def ease(x): x = min(1.0, max(0.0, x)); return 1 - (1 - x) ** 3
 _LOGOS = []  # боксы водяних знаків поточного джерела (частки кадру), ставить make_edit
 
 
+def _body(crop):
+    """Людина на кадрі за сегментацією (окрема мережа на потік): -> (частка площі, висота силуету 0..1, низ силуету 0..1).
+    Потрібно для загальних планів (у повний зріст), де обличчя маленьке."""
+    cv2 = _cv2(); C = _casc()
+    if "seg" not in C:
+        try: C["seg"] = cv2.dnn.readNet(str(SEG_MODEL)) if SEG_MODEL.exists() else None
+        except Exception: C["seg"] = None
+    net = C["seg"]
+    if net is None: return 0.0, 0.0, 0.0
+    try:
+        net.setInput(cv2.dnn.blobFromImage(np.ascontiguousarray(crop), 1 / 127.5, (192, 192), (127.5,) * 3, swapRB=True, crop=False))
+        m = net.forward()[0, 1] > 0.5
+    except Exception:
+        return 0.0, 0.0, 0.0
+    area = float(m.mean())
+    if area < 0.015: return area, 0.0, 0.0
+    rows = np.where(m.mean(axis=1) > 0.02)[0]
+    if not len(rows): return area, 0.0, 0.0
+    return area, float(rows[-1] - rows[0] + 1) / m.shape[0], float(rows[-1] + 1) / m.shape[0]
+
+
 def frame_quality(img):
     """Чи гарний кадр для едіту — рахується по тій частині, що реально піде у вертикальний ролик (9:16, по обличчю).
     Штрафує: темряву/пересвіт, «порожні» кадри (стіна, підлога, розмитий шматок предмета), вшиті написи, змаз;
@@ -590,7 +611,12 @@ def frame_quality(img):
     in_crop = big is not None and x0 <= big[0] + big[2] / 2 <= x0 + cw
     cl = lambda v: min(1.0, max(0.0, v))
     sc = 0.0
-    if in_crop:
+    barea, bh, bbot = _body(crop)
+    full = barea > 0.04 and bh > 0.55 and colorful <= 105 and fw < 0.1  # силует на пів кадру + невелике обличчя — загальний план
+    if full:
+        sc += 2.6 + 0.4 * cl((bh - 0.55) / 0.3)       # загальний план — так само цінний, як крупний
+        in_crop = True; fw = max(fw, 0.05)
+    elif in_crop:
         sc += 2.4 * cl((fw - 0.03) / 0.05) + 0.8 * cl(fw / 0.08)  # людина в кадрі — головне (крихітне «обличчя» < 3 % — не рахується: часто це гра/екран)
         if fw > 0.42: sc -= 0.6                        # дуже великий план — гірше читається
         if fw > 0.7: sc -= 1.2                         # обличчя на весь екран — «непонятний» кадр
@@ -608,8 +634,8 @@ def frame_quality(img):
     sc -= 2.4 * min(tl, 3) + 30 * ta                 # вшиті написи/субтитри джерела в едіті — це сміття
     if sharp < 30: sc -= 1.5
     hard = dark > 0.45 or hot > 0.5 or tl >= 1 or ent < 4.3 or edges < 0.012 or sharp < 18 or sb >= 3
-    return {"hard": bool(hard), "score": sc, "face": bool(in_crop and fw >= 0.04), "fs": round(fw * fw * ASPECT, 4) if in_crop else 0.0, "br": round(float(g.mean()) / 255, 3),
-            "sa": round(colorful / 40 - 1, 2), "txt": tl, "fw": round(fw, 3) if in_crop else 0.0, "dark": dark, "empty": ent < 4.3 or edges < 0.012}
+    return {"hard": bool(hard), "score": sc, "face": bool(in_crop and (fw >= 0.04 or full)), "fs": round(fw * fw * ASPECT, 4) if in_crop else 0.0, "br": round(float(g.mean()) / 255, 3),
+            "sa": round(colorful / 40 - 1, 2), "txt": tl, "fw": round(fw, 3) if in_crop else 0.0, "full": bool(full), "dark": dark, "empty": ent < 4.3 or edges < 0.012}
 
 
 def scan_video(src, dur, skip=(), job=None):
@@ -827,6 +853,15 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
                 if all(abs(c["t"] - p["t"]) > gap and _sig_d(c.get("sig"), p.get("sig")) > thr_d for p in picks): picks.append(c)
             if len(picks) >= n: break
         while len(picks) < n: picks.append(rnd.choice(good[:max(3, len(good) // 2)]))
+        # загальні плани (у повний зріст) — щонайменше ~чверть кадрів, якщо такі є у відео
+        want_w = n // 4
+        wide = [c for c in sorted(good, key=lambda x: -x["score"]) if c.get("full") and c not in picks]
+        while sum(1 for p in picks if p.get("full")) < want_w and wide:
+            c = wide.pop(0)
+            if any(abs(c["t"] - p["t"]) < 3 for p in picks): continue
+            rm = min((p for p in picks if not p.get("full")), key=lambda p: p["score"], default=None)
+            if rm is None: break
+            picks[picks.index(rm)] = c
         best = max(picks, key=lambda x: x["score"])
         picks = sorted([p for p in picks if p is not best], key=lambda x: x["t"])
         di = min(range(n), key=lambda i: abs(cuts[i] - drop))
@@ -838,7 +873,7 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
             k2 = next((k for k in rest if picks[k] is not best and picks[k].get("face")), None)
             if k2 is not None and picks[k2]["score"] > picks[-1]["score"]: picks[-1], picks[k2] = picks[k2], picks[-1]
         # ритм планів, як у монтажера: не 3 однакові плани поспіль; ролик відкривається загальним/середнім планом
-        size = lambda p: "close" if p.get("fw", 0) > 0.28 else ("mid" if p.get("fw", 0) > 0.1 else "wide")
+        size = lambda p: "wide" if p.get("full") else ("close" if p.get("fw", 0) > 0.28 else ("mid" if p.get("fw", 0) > 0.1 else "wide"))
         for k in range(min(4, len(picks))):
             if size(picks[0]) != "close": break
             if size(picks[k]) != "close": picks[0], picks[k] = picks[k], picks[0]; break
@@ -1313,12 +1348,12 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
         cache = d / "vscan.json"
         try: vpool = _json.loads(cache.read_text()) if cache.exists() else None
         except Exception: vpool = None
-        if isinstance(vpool, dict) and vpool.get("v") == 9 and vpool.get("ar", "9:16") == ar_: vpool = vpool["items"]
+        if isinstance(vpool, dict) and vpool.get("v") == 10 and vpool.get("ar", "9:16") == ar_: vpool = vpool["items"]
         else:
             job.step("edit_scan", 60)
             vpool = scan_video(meta["video"], meta.get("duration") or 0, skip=(meta.get("info") or {}).get("skip") or [], job=job)
             job.log("edit_scanned", len(vpool))
-            cache.write_text(_json.dumps({"v": 9, "ar": ar_, "items": vpool}))
+            cache.write_text(_json.dumps({"v": 10, "ar": ar_, "items": vpool}))
         for v in vpool:  # моменти, де щось відбувається за звуком/чатом, — трохи вище
             if any(abs(v["t"] - c["peak"]) < 4 for c in pool if c.get("final", 0) > 0.5): v["score"] += 0.6
         if len(vpool) < 8: vpool = None
