@@ -344,6 +344,7 @@ def verify_shots(shots, vpool, src, off, job=None):
                 t = max(0.0, c["t"] - 0.15)
                 if any(abs(t - u) < gap for u in used): continue
                 if any(abs(t - nb["t"]) < 1.5 for nb in neigh): continue  # той самий момент двічі поспіль — ні
+                if not c.get("face") and gap > 0: continue  # на заміну — лише кадри з людиною
                 if t not in qc: qc[t] = _shot_quality(src, t - off, span); tried += 1
                 dup = sum(abs(t - u) < 1.0 for u in used)
                 qe = qc[t] - 1.3 * dup  # повтори — лише якщо справді краще
@@ -597,7 +598,9 @@ def frame_quality(img):
     sc += 0.9 * cl((ent - 4.6) / 2.4) + 0.8 * cl(edges / 0.07) + 0.6 * cl(colorful / 55) + 0.6 * cl((contrast - 22) / 38)
     sc += 0.7 * cl((math.log1p(sharp) - 3.0) / 3.0)
     if ent < 4.3 or edges < 0.012: sc -= 2.5         # порожній кадр
-    if not in_crop and (colorful < 22 or contrast < 25): sc -= 1.2  # без людини — лише якщо картинка яскрава сама по собі
+    if not in_crop:
+        sc -= 2.0                                      # без людини (гра на екрані, карта, предмети) — лише як рідка вставка
+        if colorful < 22 or contrast < 25: sc -= 1.2
     sc -= 4.0 if dark > 0.6 else (1.5 if dark > 0.4 else 0)
     sc -= 1.5 if hot > 0.45 else 0
     sc -= 2.4 * min(tl, 3) + 30 * ta                 # вшиті написи/субтитри джерела в едіті — це сміття
@@ -830,7 +833,7 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
         # фінал — другий за силою момент (найсильніший уже на дропі), а не просто останній за часом
         if len(picks) > 3:
             rest = sorted(range(len(picks) - 1), key=lambda k: -picks[k]["score"])
-            k2 = next((k for k in rest if picks[k] is not best), None)
+            k2 = next((k for k in rest if picks[k] is not best and picks[k].get("face")), None)
             if k2 is not None and picks[k2]["score"] > picks[-1]["score"]: picks[-1], picks[k2] = picks[k2], picks[-1]
         # ритм планів, як у монтажера: не 3 однакові плани поспіль; ролик відкривається загальним/середнім планом
         size = lambda p: "close" if p.get("fw", 0) > 0.28 else ("mid" if p.get("fw", 0) > 0.1 else "wide")
@@ -1288,12 +1291,12 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
         cache = d / "vscan.json"
         try: vpool = _json.loads(cache.read_text()) if cache.exists() else None
         except Exception: vpool = None
-        if isinstance(vpool, dict) and vpool.get("v") == 7 and vpool.get("ar", "9:16") == ar_: vpool = vpool["items"]
+        if isinstance(vpool, dict) and vpool.get("v") == 8 and vpool.get("ar", "9:16") == ar_: vpool = vpool["items"]
         else:
             job.step("edit_scan", 60)
             vpool = scan_video(meta["video"], meta.get("duration") or 0, skip=(meta.get("info") or {}).get("skip") or [], job=job)
             job.log("edit_scanned", len(vpool))
-            cache.write_text(_json.dumps({"v": 7, "ar": ar_, "items": vpool}))
+            cache.write_text(_json.dumps({"v": 8, "ar": ar_, "items": vpool}))
         for v in vpool:  # моменти, де щось відбувається за звуком/чатом, — трохи вище
             if any(abs(v["t"] - c["peak"]) < 4 for c in pool if c.get("final", 0) > 0.5): v["score"] += 0.6
         if len(vpool) < 8: vpool = None
@@ -1326,6 +1329,16 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
             if sh["hard"] and all(not (x["t0"] - 0.6 < sh["a"] < x["t1"] + 0.6) for x in ev):
                 ev.append({"t0": sh["a"], "t1": min(L, sh["b"] + 0.3), "txt": rnd.choice(pool_w)})
         ev.sort(key=lambda e: e["t0"])
+    if sung:  # довгі «дірки» без тексту (модель не розчула шматок пісні) — ключове слово пісні на сильну долю
+        heroes_w = [e["txt"] for e in ev if e.get("hero")] or [w_ for e in ev if e.get("sung") for w_, _ in e["words"] if len(w_) >= 4]
+        if heroes_w:
+            from collections import Counter
+            top = [w_ for w_, _ in Counter(x.upper() for x in heroes_w).most_common(3)]
+            for sh in shots:
+                if sh["a"] > L - 1.4 or not (sh["hard"] or sh.get("drop")): continue
+                if all(not (x["t0"] - 1.4 < sh["a"] < x["t1"] + 1.4) for x in ev):
+                    ev.append({"t0": sh["a"], "t1": min(L - 1.0, sh["a"] + 0.9), "txt": rnd.choice(top), "hero": True})
+            ev.sort(key=lambda e: e["t0"])
     if tm != "none" and not sung and len(ev) < L / 2.2:  # пісні без слів — додаємо фрази стрімера з цих кадрів
         extra = speech_events(shots, meta, o, job, L, rnd)
         ev = sorted(ev + [e for e in extra if all(not (x["t0"] - 0.1 < e["t0"] < x["t1"]) for x in ev)], key=lambda e: e["t0"])
@@ -1415,7 +1428,8 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     try:
         for i, (sh, pr) in enumerate(zip(shots, parts)):
             job.check()
-            pd = subprocess.Popen([ffmpeg(), "-v", "error", "-i", pr["file"], "-f", "rawvideo", "-pix_fmt", "bgr24", "-"], stdout=subprocess.PIPE)
+            pd = subprocess.Popen([ffmpeg(), "-v", "quiet", "-i", pr["file"], "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)  # читаємо не до кінця — «Broken pipe» не друкуємо
             if seg: seg.reset()
             nxt = shots[i + 1] if i + 1 < len(shots) else None
             leak = leak_layer(rnd) if rnd.random() < 0.2 else None
