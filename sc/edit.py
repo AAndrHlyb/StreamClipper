@@ -967,6 +967,7 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
     if L - cuts[-1] > 1.8:  # фінальний кадр не висить 2–3 с: ще одна склейка на долю ближче до кінця
         late = [b for b in beats if cuts[-1] + 0.5 < b < L - 0.9]
         if late: cuts.append(min(late, key=lambda b: abs(b - (L - 1.2))))
+    cuts = [cuts[0]] + [round(c - 1.0 / FPS, 4) for c in cuts[1:]]  # склейка на кадр раніше удару — око бачить її рівно «в біт»
     cuts.append(L)
     n = len(cuts) - 1
     style = style or FX.STYLES["hype"]
@@ -1098,7 +1099,7 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
 # ------------------------------------------------------------------ кадр із джерела
 def render_shot(src, t, sh, o, job, out, cam=None, logos=None):
     """Кадр плану → 1080×1920. Повертає кількість ВИХІДНИХ кадрів n і кількість кадрів у файлі nsrc (для рампи швидкості)."""
-    nfr = max(2, int(round((sh["b"] - sh["a"]) * FPS)))
+    nfr = max(2, int(round(sh["b"] * FPS)) - int(round(sh["a"] * FPS)))  # від абсолютних меж: без накопиченого зсуву від біту
     span = (sh["b"] - sh["a"]) * sh["speed"]
     nsrc = max(nfr, int(round(span * FPS)))
     pre = f"crop=iw*{cam[2]:.4f}:ih*{cam[3]:.4f}:iw*{cam[0]:.4f}:ih*{cam[1]:.4f}" if cam else ""
@@ -1972,6 +1973,27 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     pe = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     beats, hits = m["beats"], m["hits"]
     sb = sorted(zip(m["strength"], m["beats"]), reverse=True); strong = {b for _, b in sb[:max(1, len(sb) // 5)]}
+    # «огинаюча» біту по кадрах: на кожну долю — спалах сили долі, що згасає за ~0.12 с; окремо — бас (808/кік)
+    benv = np.zeros(nfr_total + 2, np.float32); bass_env = np.zeros_like(benv)
+    for k_, b_ in enumerate(beats):
+        f0 = int(round(b_ * FPS)) - 1  # синхронно з кадром склейки
+        if f0 >= len(benv) or f0 < -8: continue
+        s_ = float(m["strength"][k_]) if k_ < len(m["strength"]) else 0.5
+        bs_ = float(m["bass"][k_]) if k_ < len(m.get("bass") or []) else 0.5
+        for df in range(0, 8):
+            if 0 <= f0 + df < len(benv):
+                e_ = math.exp(-df / (0.12 * FPS))
+                benv[f0 + df] = max(benv[f0 + df], s_ * e_); bass_env[f0 + df] = max(bass_env[f0 + df], s_ * bs_ * e_)
+    if benv.max() > 0: benv /= benv.max()
+    if bass_env.max() > 0: bass_env /= bass_env.max()
+    PULSES = {"intro": [None, None, "pump"], "build": ["pump", "zoomblur", "pump", None], "pre": ["pump", "shake", "zoomblur"],
+              "drop": ["chroma", "flashlite", "shake", "zoomblur", "glowpulse"], "peak": ["chroma", "flashlite", "shake", "zoomblur", "pump", "glowpulse"],
+              "resolve": [None, "pump"]}
+    for sh in shots:  # ефект, що «дихає» на кожну долю всередині шоту (не лише на склейці)
+        opts_ = PULSES.get(sh.get("sec"), [None])
+        if sname == "cinema" or o.get("edit_mode") == "cinema": opts_ = [None, "pump", "glowpulse"]
+        sh["pulse"] = None if sh.get("blackout") else rnd.choice(opts_)
+        sh["pk"] = (1.25 if sname in ("hype", "neon") else 0.85 if sname == "cinema" else 1.0) * (1.2 if sh.get("sec") in ("drop", "peak") else 0.8)
     nick = (o.get("nick") or "").strip().lstrip("@")
     wm = sprite(nick, 50, FONT_BOLD, (240, 240, 240), stroke=2, stroke_fill=(30, 30, 30)) if nick else None
     endc = sprite(nick.upper(), fit_size(nick.upper(), FONT_BIG, W * 0.7, hi=220), FONT_BIG, (245, 245, 245)) if nick else None
@@ -2026,9 +2048,13 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                     ht = 1.0 if hits[hptr] in strong else 0.6; hptr += 1
                 while brptr < len(brand_ts) and brand_ts[brptr] <= t + 1e-3:
                     ht = 1.0; brptr += 1  # бренд прозвучав — удар камерою
+                fq = min(len(benv) - 1, fi); be, bb = float(benv[fq]), float(bass_env[fq])
                 zr, dx, dy, ang = rig.step(t, 1 / FPS, bt, ht, last_head, 1.0 + (0.08 if sh.get("move") in ("push", "pull", "pan") else 0.04))
                 z = zr + (0.02 * j / max(1, pr["n"]) if not sh.get("resolve") else 0.06 * j / max(1, pr["n"]))
-                bp = min(1.0, max(0.0, rig.zx * 30))  # пульс долі для тексту
+                bp = max(min(1.0, max(0.0, rig.zx * 30)), be)  # пульс долі для тексту й образів
+                if sh.get("pulse") == "shake" and be > 0.05:  # поштовх камери рівно на долю
+                    sgn_ = 1 if (fi // 2) % 2 else -1
+                    dx += sgn_ * 26 * be * sh["pk"]; dy += -sgn_ * 14 * be * sh["pk"]; ang += sgn_ * 1.2 * be * sh["pk"]
                 # ---- переходи з узгодженою швидкістю: рух не зупиняється на склейці
                 # ---- рух камери всередині шоту (обирає «режисер») + хук на першому кадрі ролика
                 prog = j / max(1, pr["n"] - 1); lt0 = j / FPS; mv = sh.get("move")
@@ -2040,6 +2066,8 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 elif mv == "punch": z *= 1 + 0.28 * (1 - ease(lt0 / 0.3))
                 if i == 0: z *= 1 + 0.35 * (1 - ease(lt0 / 0.45))
                 fx, nfx = sh["fx"], (nxt["fx"] if nxt else "cut")
+                KB = int(round(m["period"] * FPS))  # перехід «доїжджає» рівно на наступну долю (на коротких шотах — на півдолі)
+                KB = KB if KB <= pr["n"] * 0.8 else max(4, KB // 2)
                 tail = pr["n"] - 1 - j  # кадрів до кінця шоту
                 blur = 0.0; hblur = 0
                 if nfx == "zoom" and tail < 4:           # вихід: розгін наїзду
@@ -2081,14 +2109,14 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 if prev is not None and fx == "iris" and j < 6: fr = safe("iris", lambda: FX.tr_iris(prev, fr, (j + 1) / 6), fr)
                 if fx == "eye" and j < 7: fr = safe("eye", lambda: FX.tr_iris(np.zeros_like(fr), fr, ease((j + 1) / 7)), fr)
                 if prev is not None and fx == "mask":
-                    K = max(8, min(14, int(pr["n"] * 0.5)))
+                    K = max(5, min(16, KB, pr["n"] - 1))
                     if j < K:
                         if "mold" not in sst: sst["mold"] = prev.copy()
                         fr = safe("mask", lambda: FX.tr_mask(sst["mold"], fr, sst, sst["pm"], ease((j + 1) / K)), fr)
                 if fx == "dip" and j < 7: fr = (fr * ((j + 1) / 8)).astype(np.uint8)
                 if nfx == "dip" and tail < 5: fr = (fr * ((tail + 1) / 6)).astype(np.uint8)
                 if prev is not None and fx in ("slide", "splitin", "strips", "crash"):
-                    K = max(6, min(12, int(pr["n"] * 0.45)))
+                    K = max(4, min(16, KB, pr["n"] - 1))
                     if j < K:
                         if "sdir" not in sst: sst["sdir"] = "up" if fx == "crash" else rnd.choice(["up", "up", "down", "left", "right"]); sst["old"] = prev.copy()
                         prev_out = sst["old"]
@@ -2098,9 +2126,10 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                             if "shz" not in sst: sst["shz"] = rnd.random() < 0.6
                             fr = safe("strips", lambda: FX.tr_strips(prev_out, fr, qv, vel, 3, sst["shz"]), fr)
                         else: fr = safe("splitin", lambda: FX.tr_splitin(prev_out, fr, qv, vel), fr)
-                if prev is not None and fx == "cube" and j < 8:  # поворот куба
+                KC = max(4, min(10, KB // 2 if KB > 10 else KB))
+                if prev is not None and fx == "cube" and j < KC:  # поворот куба — до півдолі
                     if "cold" not in sst: sst["cold"] = prev.copy(); sst["cdir"] = rnd.choice([-1, 1])
-                    fr = safe("cube", lambda: FX.tr_cube(sst["cold"], fr, ease((j + 1) / 8), sst["cdir"]), fr)
+                    fr = safe("cube", lambda: FX.tr_cube(sst["cold"], fr, ease((j + 1) / KC), sst["cdir"]), fr)
                 if prev is not None and fx == "shutter" and j < 6: fr = safe("shutter", lambda: FX.tr_shutter(prev, fr, (j + 1) / 6), fr)
                 if leak is not None:
                     a = 0.32 * (0.5 + 0.5 * math.sin(t * 3 + i))
@@ -2110,7 +2139,7 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 head = safe("head", lambda: head_of(mask), None) if mask is not None else None
                 last_head = head
                 lt = j / FPS; dshot = pr["n"] / FPS
-                sst["bp"] = bp
+                sst["bp"] = max(bp, bb)
                 if sh.get("look"):
                     fr = safe("look_" + sh["look"], lambda: FX.LOOKS[sh["look"]](fr, mask if head else None, head, lt, dshot, sst, ev_acc), fr)
                 if sh.get("hit") in ("silhouette", "invert") and j < 4:
@@ -2123,6 +2152,17 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                     fr = safe("burn", lambda: FX.hit_burn(fr, (1.0, 0.9, 0.7, 0.5, 0.32, 0.18, 0.08)[j] * (0.85 + 0.3 * rnd.random()), i), fr)
                 if sh.get("hit") == "streak" and j < 5:
                     fr = safe("streak", lambda: FX.hit_streak(fr, (1.0, 0.8, 0.55, 0.3, 0.12)[j], ev_acc, i), fr)
+                pu = sh.get("pulse"); qb = (bb if pu in ("pump", "glowpulse") else be) * sh.get("pk", 1.0)
+                if pu and qb > 0.04:
+                    if pu == "pump": fr = cv2.convertScaleAbs(fr, alpha=1 + 0.22 * qb, beta=-14 * qb)  # «накачка» контрасту на бас
+                    elif pu == "chroma": fr = safe("pchroma", lambda: FX.hit_chroma(fr, min(1.0, 0.55 * qb)), fr)
+                    elif pu == "flashlite": fr = cv2.addWeighted(fr, 1 - 0.22 * qb, np.full_like(fr, 255), 0.22 * qb, 0)
+                    elif pu == "zoomblur": fr = safe("pzb", lambda: zoom_blur(fr, 0.05 * qb), fr)
+                    elif pu == "glowpulse":
+                        def _gp(f_, q_):
+                            g_ = cv2.GaussianBlur(cv2.resize(f_, (W // 4, H // 4)), (0, 0), 6)
+                            return cv2.addWeighted(f_, 1.0, cv2.resize(g_, (W, H)), 0.45 * q_, 0)
+                        fr = safe("pglow", lambda: _gp(fr, qb), fr)
                 if nfz and j < nfz + 3:
                     qf = 1.0 if j < nfz else (nfz + 3 - j) / 4
                     fr = safe("freeze", lambda: FX.hit_freeze(fr, mask if head else None, qf, ev_acc), fr)
