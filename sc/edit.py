@@ -634,7 +634,8 @@ def frame_quality(img):
     sc -= 2.4 * min(tl, 3) + 30 * ta                 # вшиті написи/субтитри джерела в едіті — це сміття
     if sharp < 30: sc -= 1.5
     hard = dark > 0.45 or hot > 0.5 or tl >= 1 or ent < 4.3 or edges < 0.012 or sharp < 18 or sb >= 3 or colorful > 100  # >100 — гра/екран
-    return {"hard": bool(hard), "score": sc, "face": bool(in_crop and (fw >= 0.04 or full) and colorful <= 100), "fs": round(fw * fw * ASPECT, 4) if in_crop else 0.0, "br": round(float(g.mean()) / 255, 3),
+    return {"hard": bool(hard), "score": sc, "face": bool(in_crop and (fw >= 0.04 or full) and colorful <= 100),
+            "fy": round(float((big[1] + big[3] / 2) / h0), 3) if big is not None else 0.4, "fs": round(fw * fw * ASPECT, 4) if in_crop else 0.0, "br": round(float(g.mean()) / 255, 3),
             "sa": round(colorful / 40 - 1, 2), "txt": tl, "fw": round(fw, 3) if in_crop else 0.0, "full": bool(full), "dark": dark, "empty": ent < 4.3 or edges < 0.012}
 
 
@@ -882,6 +883,20 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
                 for j in range(k + 1, len(picks)):
                     if size(picks[j]) != size(picks[k]) and picks[j] is not best:
                         picks[k], picks[j] = picks[j], picks[k]; break
+        # контрастна склейка на дроп (smash cut): перед дропом — найтемніший/найспокійніший кадр, на дропі — найсильніший
+        di = picks.index(best) if best in picks else -1
+        if di > 1:
+            cand = min((k for k in range(1, di) if picks[k].get("face")), key=lambda k: picks[k].get("br", 0.5), default=None)
+            if cand is not None and cand != di - 1: picks[di - 1], picks[cand] = picks[cand], picks[di - 1]
+        # склейки «по збігу» (match cut): серед сусідніх кадрів (±2) наступним ставимо той, де людина того ж розміру
+        # і на тій самій висоті — склейка стає майже непомітною; дроп і його сусідів не чіпаємо
+        def mdist(a_, b_): return abs(a_.get("fw", 0) - b_.get("fw", 0)) * 3 + abs(a_.get("fy", 0.4) - b_.get("fy", 0.4))
+        for k in range(1, len(picks) - 1):
+            if abs(k - di) <= 1 or k == 0: continue
+            js = [j for j in range(k, min(len(picks), k + 3)) if abs(j - di) > 1]
+            if not js: continue
+            j = min(js, key=lambda j: mdist(picks[k - 1], picks[j]) + (0.6 if size(picks[j]) == size(picks[k - 1]) == size(picks[max(0, k - 2)]) else 0))
+            if j != k: picks[k], picks[j] = picks[j], picks[k]
     flashes = 0; shots = []; hits_n = 0; used_tr, used_look, used_hit, used_mv = {}, {}, {}, {}
     for i in range(n):
         a, b = cuts[i], cuts[i + 1]; d = b - a
@@ -921,6 +936,9 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
             if hit == "flash" and flashes >= max_flash: hit = None
             if hit: hits_n += 1; flashes += hit == "flash"
         if hit == "flash": fx = "flash" if fx in ("cut", "none") else fx
+        if (video_pool and i > 0 and not hit and not blk and not is_drop and picks[i].get("face") and picks[i - 1].get("face")
+                and mdist(picks[i - 1], picks[i]) < 0.09 and rnd.random() < 0.6):
+            fx = "cut"  # збіг композиції — чиста склейка без ефекту, «невидима»
         move = FX.choose(FX.MOVE_RULES, c, rnd, (), used_mv, prev_sh.get("move") if prev_sh else None, noise=0.5)
         look = None if (blk or sum(used_look.values()) >= max(3, int(n * 0.55)) or (not is_drop and rnd.random() < 0.25)) else FX.choose(FX.LOOK_RULES, c, rnd, style["looks"], used_look, prev_sh["look"] if prev_sh else None,
                                          person_only=FX.PERSON_LOOKS)
@@ -1352,12 +1370,12 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
         cache = d / "vscan.json"
         try: vpool = _json.loads(cache.read_text()) if cache.exists() else None
         except Exception: vpool = None
-        if isinstance(vpool, dict) and vpool.get("v") == 11 and vpool.get("ar", "9:16") == ar_: vpool = vpool["items"]
+        if isinstance(vpool, dict) and vpool.get("v") == 12 and vpool.get("ar", "9:16") == ar_: vpool = vpool["items"]
         else:
             job.step("edit_scan", 60)
             vpool = scan_video(meta["video"], meta.get("duration") or 0, skip=(meta.get("info") or {}).get("skip") or [], job=job)
             job.log("edit_scanned", len(vpool))
-            cache.write_text(_json.dumps({"v": 11, "ar": ar_, "items": vpool}))
+            cache.write_text(_json.dumps({"v": 12, "ar": ar_, "items": vpool}))
         for v in vpool:  # моменти, де щось відбувається за звуком/чатом, — трохи вище
             if any(abs(v["t"] - c["peak"]) < 4 for c in pool if c.get("final", 0) > 0.5): v["score"] += 0.6
         if len(vpool) < 8: vpool = None
@@ -1594,6 +1612,8 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                         col = (255, 255, 255) if i % 2 else ev_acc
                         fr = safe("silhouette", lambda: FX.hit_silhouette(fr, mask, q, col), fr)
                     elif sh["hit"] == "invert": fr = safe("invert", lambda: FX.hit_invert(fr, q * 0.9), fr)
+                if sh.get("hit") == "burn" and j < 7:
+                    fr = safe("burn", lambda: FX.hit_burn(fr, (1.0, 0.9, 0.7, 0.5, 0.32, 0.18, 0.08)[j] * (0.85 + 0.3 * rnd.random()), i), fr)
                 if sh.get("hit") == "streak" and j < 5:
                     fr = safe("streak", lambda: FX.hit_streak(fr, (1.0, 0.8, 0.55, 0.3, 0.12)[j], ev_acc, i), fr)
                 if sh.get("hit") == "chroma" and j < 4:

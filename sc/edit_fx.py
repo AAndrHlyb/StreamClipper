@@ -732,7 +732,7 @@ def look_depth3d(fr, m, head, lt, d, st, acc):
     sx = 1 / (1 + zoom * p)
     mx = cx + (xx - cx) * sx - shift * p
     my = cy + (yy - cy) * sx
-    return cv2.remap(fr, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    return cv2.remap(fr, mx.astype(np.float32), my.astype(np.float32), cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
 
 
 LOOKS["depth3d"] = look_depth3d
@@ -768,4 +768,46 @@ def tr_cube(prev, fr, q, direction=1):
 for _s in STYLES.values():
     if "cube" not in _s["trans"] and _s is not STYLES.get("noir"): _s["trans"].append("cube")
 TRANS_RULES["cube"] = lambda c: 0.45 + 0.35 * _ON(c, "build", "peak") + 0.2 * (c["d"] >= 0.5)
+
+
+# ------------------------------------------------------------------ плівковий «опік» і комікс-растр
+def hit_burn(fr, q, seed=0):
+    """Опік плівки на склейці: теплі помаранчево-червоні плями, що розгоряються від краю й гаснуть, з мерехтінням."""
+    cv2 = _cv2()
+    if q <= 0: return fr
+    r = np.random.RandomState(seed)
+    n = np.zeros((H // 16, W // 16), np.float32)
+    for _ in range(5):
+        cx, cy = r.randint(0, W // 16), r.choice([r.randint(0, H // 48 + 1), H // 16 - 1 - r.randint(0, H // 48 + 1)])
+        cv2.circle(n, (int(cx), int(cy)), int(r.randint(3, 9)), 1.0, -1)
+    n = cv2.GaussianBlur(n, (0, 0), 4)
+    n = cv2.resize(n, (W, H), interpolation=cv2.INTER_CUBIC)[..., None]
+    col = np.array([30, 110, 255], np.float32)[None, None, :]  # BGR помаранчевий
+    hot = np.clip(n * 2.2 - 0.6, 0, 1)
+    out = fr.astype(np.float32) + n * col * 1.6 * q + hot * 255 * q
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def look_halftone(fr, m, head, lt, d, st, acc):
+    """Комікс-растр: фон — крапки (розмір за яскравістю) кольором акценту на папері, людина — у кольорі з білим обідком."""
+    cv2 = _cv2()
+    g = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+    cell = 12
+    gs = cv2.resize(g, (W // cell, H // cell), interpolation=cv2.INTER_AREA).astype(np.float32) / 255
+    paper = np.full((H, W, 3), (232, 240, 246), np.uint8)
+    col = tuple(int(c * 0.75) for c in acc)
+    for yy in range(gs.shape[0]):
+        for xx in range(gs.shape[1]):
+            rr = (1 - min(1.0, gs[yy, xx] * 1.6)) ** 1.4 * cell * 0.62
+            if rr > 0.8: cv2.circle(paper, (xx * cell + cell // 2, yy * cell + cell // 2), int(rr), col, -1, cv2.LINE_AA)
+    if m is None: return paper
+    M = full_mask(m)
+    rim = np.clip(cv2.GaussianBlur(M[..., 0], (0, 0), 4)[..., None] - M, 0, 1) * 2
+    out = paper * (1 - M) + fr * M + 255 * rim
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+LOOKS["halftone"] = look_halftone
+LOOK_RULES["halftone"] = lambda c: 0.35 + 0.35 * c["face"] + 0.3 * _ON(c, "build", "peak") + 0.2 * c["busy"]
+HIT_RULES["burn"] = lambda c: 0.4 + 0.3 * _ON(c, "intro", "build", "drop") + 0.2 * (1 - c["br"])
 
