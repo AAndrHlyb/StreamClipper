@@ -308,39 +308,22 @@ def _shot_quality(src, t, span):
     cv2 = _cv2()
     sw, shh = _src_wh(src)
     w = 640; h = int(round(640 * (shh / sw) / 2)) * 2 if sw and shh else 360
-    fr = [_grab(src, t + d, w, h) for d in (0.1, span * 0.5, max(0.2, span * 0.95))]
-    if any(f is None for f in fr): return -9.0
+    # 5 проб на ВСЬОМУ шматку, включно з хвостом +0.5 с, який бачать переходи (slide/strips показують кінець шоту)
+    full = span + 0.5
+    fr = [_grab(src, t + d, w, h) for d in (0.1, full * 0.25, full * 0.5, full * 0.75, max(0.2, full * 0.97))]
+    if sum(f is None for f in fr) > 1 or fr[0] is None: return -9.0
+    fr = [f for f in fr if f is not None]
     qs = [frame_quality(f) for f in fr]
     q = min(x["score"] for x in qs)
     if any(x["hard"] for x in qs): q = min(q, -5.0)  # титри/субтитри/темрява/порожнеча/змаз — ніколи
-    if sum(1 for x in qs if x["face"]) < 2: q = min(q - 2.5, -3.0)  # людини майже нема в самому шоті (гра, підлога, стеля) — під заміну
+    if any(not x["face"] for x in qs): q = min(q - 2.5, -3.0)  # хоч одна проба без людини (гра посеред шоту, підлога) — під заміну
     ga = cv2.resize(cv2.cvtColor(fr[0], cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
-    gb = cv2.resize(cv2.cvtColor(fr[2], cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
+    gb = cv2.resize(cv2.cvtColor(fr[-1], cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
     mot = float(np.abs(ga - gb).mean())
     if mot < 2.0: q -= 0.6          # зовсім статичний кадр — нудно
     elif mot > 60: q -= 1.0         # там склейка або хаос — кадр «непонятний»
     elif 6 <= mot <= 35: q += 0.6   # у кадрі щось відбувається — живіше
     return q
-
-
-def _part_bad(path):
-    """Перевірка відрендереного шматка (вже кроп під формат): 4 кадри. -> причина або ''."""
-    cv2 = _cv2()
-    cap = cv2.VideoCapture(str(path))
-    tot = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
-    face = 0; why = ""
-    for k in (0.05, 0.35, 0.65, 0.95):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(tot * k))
-        ok, fr = cap.read()
-        if not ok: continue
-        small = cv2.resize(fr, (640, int(640 * fr.shape[0] / fr.shape[1])))
-        q = frame_quality(small)
-        face += q["face"]
-        if q["hard"]: why = "hard"
-    cap.release()
-    if why: return why
-    if face < 2: return "noperson"
-    return ""
 
 
 def verify_shots(shots, vpool, src, off, job=None):
@@ -1476,22 +1459,24 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
         if sh["k"] < 0: src, ft = meta["video"], sh["t"] - meta.get("video_offset", 0.0)
         else:
             src, off, s0 = src_of(sh["k"]); ft = max(0.0, off + sh["t"] - s0)
+        # остаточна перевірка саме тих секунд (з хвостом для переходу), що підуть у ролик: гра / субтитри / темрява / без людини → інший момент
+        if sh["k"] < 0 and vpool:
+            span = (sh["b"] - sh["a"]) * sh["speed"]
+            qq = _shot_quality(src, ft, span)
+            if qq <= -3:
+                off_ = meta.get("video_offset", 0.0); new = None
+                for _ in range(6):  # шукаємо заміну, перевіряючи джерело ДО рендеру
+                    with rlock:
+                        alt = next((c for c in sorted(vpool, key=lambda c: -c["score"]) if c.get("face")
+                                    and all(abs(c["t"] - u) > 2.5 for u in used_t)), None)
+                        if alt is None: break
+                        used_t.append(alt["t"])
+                    ta = max(0.0, alt["t"] - 0.15)
+                    if _shot_quality(src, ta - off_, span) > -3: new = ta; break
+                print(f"shot {i}: q={qq:.1f} → {new}", flush=True)
+                if new is not None: sh["t"] = new; ft = new - off_
         r = render_shot(src, ft, sh, o, job, wk / f"s{i:03d}.mp4", cam=cam if (cam and i % 3 != 2) else None,
                         logos=logos if meta.get("video") else None)
-        # остаточна перевірка ГОТОВОГО шматка (саме те, що піде в ролик): гра / субтитри / темрява / без людини → інший момент
-        if sh["k"] < 0 and vpool:
-            for _ in range(4):
-                bad = _part_bad(r["file"])
-                if not bad: break
-                with rlock:
-                    alt = next((c for c in sorted(vpool, key=lambda c: -c["score"]) if c.get("face")
-                                and all(abs(c["t"] - u) > 2.5 for u in used_t)), None)
-                    if alt is None: break
-                    used_t.append(alt["t"])
-                print(f"shot {i}: {bad} → {alt['t']:.1f}", flush=True)
-                sh["t"] = max(0.0, alt["t"] - 0.15); ft = sh["t"] - meta.get("video_offset", 0.0)
-                r = render_shot(src, ft, sh, o, job, wk / f"s{i:03d}.mp4", cam=cam if (cam and i % 3 != 2) else None,
-                                logos=logos if meta.get("video") else None)
         done[0] += 1; job.pct = 64 + 14 * done[0] / len(shots); job.sub = f"{done[0]}/{len(shots)}"
         return r
     parts = _pmap(one, list(range(len(shots))), max(1, perf()["render"] + 1))
