@@ -287,7 +287,7 @@ def text_events(m, o, L, rnd, words=None):
         for e in ev:
             if not e.get("sung"): continue
             for w_, tw in e["words"]:
-                if norm(w_) in hooks and tw - last_h > 2.2:
+                if norm(w_) in hooks and tw - last_h > 2.2 and tw < L - 1.3:  # не налазити на фінальну плашку
                     heroes.append({"t0": tw, "t1": min(L, tw + 0.95), "txt": w_.upper(), "hero": True}); last_h = tw; break
         ev = sorted(ev + heroes, key=lambda e: e["t0"])
     return ev
@@ -316,8 +316,9 @@ def _shot_quality(src, t, span):
     ga = cv2.resize(cv2.cvtColor(fr[0], cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
     gb = cv2.resize(cv2.cvtColor(fr[2], cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
     mot = float(np.abs(ga - gb).mean())
-    if mot < 2.0: q -= 0.4          # зовсім статичний кадр — нудно
+    if mot < 2.0: q -= 0.6          # зовсім статичний кадр — нудно
     elif mot > 60: q -= 1.0         # там склейка або хаос — кадр «непонятний»
+    elif 6 <= mot <= 35: q += 0.6   # у кадрі щось відбувається — живіше
     return q
 
 
@@ -781,6 +782,9 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
         elif b < drop: need = 0.55 if e < 0.7 else 0.42  # розгін
         else: need = 0.27 if e > 0.55 else 0.45          # кульмінація
         if b - cuts[-1] >= need - 0.03 or b - cuts[-1] > 1.6: cuts.append(b)
+    if L - cuts[-1] > 1.8:  # фінальний кадр не висить 2–3 с: ще одна склейка на долю ближче до кінця
+        late = [b for b in beats if cuts[-1] + 0.5 < b < L - 0.9]
+        if late: cuts.append(min(late, key=lambda b: abs(b - (L - 1.2))))
     cuts.append(L)
     n = len(cuts) - 1
     style = style or FX.STYLES["hype"]
@@ -804,6 +808,11 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
         di = min(range(n), key=lambda i: abs(cuts[i] - drop))
         picks.insert(min(di, len(picks)), best)
         while len(picks) < n: picks.append(dict(rnd.choice(video_pool)))  # мало кадрів у джерелі — повтори в кінці
+        # фінал — другий за силою момент (найсильніший уже на дропі), а не просто останній за часом
+        if len(picks) > 3:
+            rest = sorted(range(len(picks) - 1), key=lambda k: -picks[k]["score"])
+            k2 = next((k for k in rest if picks[k] is not best), None)
+            if k2 is not None and picks[k2]["score"] > picks[-1]["score"]: picks[-1], picks[k2] = picks[k2], picks[-1]
         # ритм планів, як у монтажера: не 3 однакові плани поспіль; ролик відкривається загальним/середнім планом
         size = lambda p: "close" if p.get("fw", 0) > 0.28 else ("mid" if p.get("fw", 0) > 0.1 else "wide")
         for k in range(min(4, len(picks))):
