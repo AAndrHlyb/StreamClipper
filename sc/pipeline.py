@@ -54,6 +54,7 @@ class Job:
                 "err": self.err, "logs": self.logs[-14:], "results": self.results, "dir": str(self.dir or ""), "live": self.live,
                 "elapsed": int(time.time() - self.t0), "src_dur": (self.info or {}).get("duration") or self.extra.get("src_dur") or 0,
                 "candidates": self.candidates if self.state == "review" else None, "extra": self.extra, "url": self.url,
+                "opts": {k: v for k, v in (self.opts or {}).items() if k.startswith(("edit", "music", "nick", "_music"))},
                 "title": (self.info or {}).get("title"), "uploader": (self.info or {}).get("uploader")}
 
 
@@ -295,18 +296,44 @@ def _edit_only(job, d, meta, o, clips, seed=1, name="edit_9x16.mp4"):
     jsave(d / "edit_pool.json", pool)
     p, dur = E.make_edit(d, meta, pool, o, job, seed=seed, name=name)
     job.extra["edit"] = p; job.extra["edit_dur"] = round(dur)
-    meta.setdefault("edits", []).append({"file": p, "dur": round(dur)}); meta["edit"] = p; meta["edit_dur"] = round(dur)
+    info = dict(job.extra.get("edit_info") or {})
+    info["thumbs"] = _edit_thumbs(p, info.get("cuts") or [])
+    keep = {k: o.get(k) for k in ("edit_extra", "edit_ref", "lyrics_fix", "edit_ban", "edit_pin") if o.get(k)}
+    job.extra["edit_info"] = info
+    meta.setdefault("edits", []).append({"file": p, "dur": round(dur), "info": info, "o": keep, "project": job.extra.get("edit_project")})
+    meta["edit"] = p; meta["edit_dur"] = round(dur)
     jsave(d / "meta.json", meta)
     shutil.rmtree(d / "out" / "_e", ignore_errors=True)
 
 
-def reedit(d, job):
-    """«Ще варіант»: той самий трек і моменти, інша розкладка кадрів і стилів тексту."""
+def _edit_thumbs(p, cuts):
+    """Превʼю кожного кадру едіту (середина шоту) — для заміни окремих кусків і лайків."""
+    p = Path(p); td = p.with_name("_th_" + p.stem); shutil.rmtree(td, ignore_errors=True); td.mkdir(parents=True, exist_ok=True)
+    out = []
+    for k, (a, b) in enumerate(cuts):
+        f = td / f"{k:03d}.jpg"
+        subprocess.run([ffmpeg(), "-y", "-v", "error", "-ss", f"{(a + b) / 2:.2f}", "-i", str(p), "-frames:v", "1", "-vf", "scale=160:-2", "-q:v", "5", str(f)],
+                       capture_output=True)
+        out.append(str(f) if f.exists() else "")
+    return out
+
+
+def reedit(d, job, extra=None, same=False, count=1):
+    """«Ще варіант»: той самий трек і моменти, інша розкладка кадрів і стилів тексту.
+    same=True — той самий план (seed) з новими налаштуваннями: правка тексту, заміна окремих кадрів.
+    count — кілька варіантів підряд."""
     d = Path(d); meta = jload(d / "meta.json", {}) or {}
-    o = opts_of(meta.get("opts") or {}); job.opts = o; job.dir = d
-    n = len(meta.get("edits", [])) + 1
-    job.step("edit_beats", 60)
-    _edit_only(job, d, meta, o, None, seed=n * 7 + 3, name=f"edit_9x16_v{n}.mp4")
+    o = opts_of(meta.get("opts") or {})
+    last = (meta.get("edits") or [{}])[-1]
+    if extra:
+        o.update({k: v for k, v in extra.items() if v is not None})
+    job.opts = o; job.dir = d
+    for c in range(max(1, min(5, int(count or 1)))):
+        meta = jload(d / "meta.json", {}) or {}
+        n = len(meta.get("edits", [])) + 1
+        seed = (last.get("info") or {}).get("seed") if same else None
+        job.step("edit_beats", 60, str(c + 1), str(count or 1))
+        _edit_only(job, d, meta, dict(o), None, seed=seed or n * 7 + 3, name=f"edit_9x16_v{n}.mp4")
 
 
 def _download(job, d, meta, url, full, a, b, p0, p1):

@@ -102,7 +102,10 @@ def library():
                             "sources_bytes": sum(f.stat().st_size for f in C.source_files(d)),
                             "compilation": comp, "compilation_dur": meta.get("compilation_dur"),
                             "teaser": teas, "teaser_dur": meta.get("teaser_dur"),
-                            "edit": edit, "edit_dur": meta.get("edit_dur")})
+                            "edit": edit, "edit_dur": meta.get("edit_dur"),
+                            "edit_info": ((meta.get("edits") or [{}])[-1].get("info") if edit else None),
+                            "edit_project": ((meta.get("edits") or [{}])[-1].get("project") if edit else None),
+                            "opts": {k: v for k, v in (meta.get("opts") or {}).items() if k.startswith(("edit", "music", "nick", "_music"))} if edit else None})
     return out[:40]
 
 
@@ -352,11 +355,26 @@ class H(BaseHTTPRequestHandler):
 
                 def go2():
                     try:
-                        P.check_fresh(); P.reedit(b["dir"], j); j.state = "done"; j.stage, j.pct = "done", 100
+                        P.check_fresh(); P.reedit(b["dir"], j, b.get("opts") or None, bool(b.get("same")), int(b.get("count") or 1))
+                        j.state = "done"; j.stage, j.pct = "done", 100
                     except Exception as e:
                         j.state, j.err = "error", str(e)
                 threading.Thread(target=go2, daemon=True).start()
                 return self.send(200, {"job": jid})
+            if p == "/api/wave":  # хвиля треку для вибору відрізка + підказки (найсильніший шматок, дроп)
+                if not allowed(b["path"]): return self.send(403, {"error": "forbidden"})
+                from sc import edit as E
+                return self.send(200, E.wave_info(b["path"], float(b.get("len") or 15)))
+            if p == "/api/refstyle":  # референс стилю: темп склейок, колір, спалахи
+                if not allowed(b["path"]): return self.send(403, {"error": "forbidden"})
+                from sc import edit as E
+                return self.send(200, E.ref_style(b["path"]))
+            if p == "/api/edit_sources":  # інші завантажені відео — як друге джерело кадрів
+                out = []
+                for x in library():
+                    m_ = C.jload(Path(x["dir"]) / "meta.json", {}) or {}
+                    if m_.get("video") and Path(m_["video"]).exists(): out.append({"dir": x["dir"], "title": x["title"]})
+                return self.send(200, out)
             if p == "/api/more":
                 if not allowed(b["dir"]): return self.send(403, {"error": "forbidden"})
                 j = start_job(b["dir"], {"n": int(b.get("n") or 10), **(b.get("opts") or {})}, None, kind="more")

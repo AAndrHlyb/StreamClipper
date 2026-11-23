@@ -329,7 +329,7 @@ def _shot_quality(src, t, span):
     return q
 
 
-def verify_shots(shots, vpool, src, off, job=None):
+def verify_shots(shots, vpool, res, job=None):
     """Кадри обирались за пробними кадрами; тут перевіряємо саме ті секунди, що підуть у ролик.
     Слабкий шот міняємо на наступного найкращого кандидата (теж перевіреного). -> скільки замінено"""
     scores = sorted(c["score"] for c in vpool)
@@ -341,7 +341,7 @@ def verify_shots(shots, vpool, src, off, job=None):
         if job is not None: job.check()
         span = (sh["b"] - sh["a"]) * sh["speed"]
         neigh = [shots[k] for k in (si - 1, si + 1) if 0 <= k < len(shots)]
-        q0 = _shot_quality(src, sh["t"] - off, span)
+        q0 = _shot_quality(*res(sh["t"]), span)
         if q0 >= thr: continue
         best, bq = None, -9e9
         qc = {}
@@ -352,7 +352,7 @@ def verify_shots(shots, vpool, src, off, job=None):
                 if any(abs(t - u) < gap for u in used): continue
                 if any(abs(t - nb["t"]) < 1.5 for nb in neigh): continue  # той самий момент двічі поспіль — ні
                 if not c.get("face") or c.get("fw", 1) < 0.04: continue  # на заміну — лише кадри з людиною
-                if t not in qc: qc[t] = _shot_quality(src, t - off, span); tried += 1
+                if t not in qc: qc[t] = _shot_quality(*res(t), span); tried += 1
                 dup = sum(abs(t - u) < 1.0 for u in used)
                 qe = qc[t] - 1.3 * dup  # повтори — лише якщо справді краще
                 if qe > bq: best, bq = t, qe
@@ -444,6 +444,128 @@ def _yunet(img):
     except Exception:
         return None  # → запасний Haar
     return [] if f is None else [tuple(int(v) for v in r[:4]) for r in f]
+
+
+def face_expr(img):
+    """Емоція на обличчі 0..1 (без окремої моделі): посмішка — рот ширший за звичайне відносно очей (точки YuNet)
+    + Haar-посмішка; відкритий рот (сміх, крик, здивування) — темна порожнина між кутиками рота."""
+    cv2 = _cv2()
+    C = _casc()
+    _yunet(img)  # ініціалізує детектор
+    det = C.get("y")
+    if det is None: return 0.0
+    h, w = img.shape[:2]
+    try:
+        det.setInputSize((w, h)); _, f = det.detect(np.ascontiguousarray(img, np.uint8))
+    except Exception:
+        return 0.0
+    if f is None or not len(f): return 0.0
+    r = max(f, key=lambda r_: r_[2] * r_[3])
+    if r[2] < w * 0.05: return 0.0
+    g0 = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    m_ = 0.12 * r[2]  # FER+ вчили на кропі з невеликим полем
+    fc = g0[int(max(0, r[1] - m_)):int(min(h, r[1] + r[3] + m_)), int(max(0, r[0] - m_)):int(min(w, r[0] + r[2] + m_))]
+    try:
+        from .emotion import expressive
+        v = expressive(fc)
+        if v is not None: return round(v, 3)
+    except Exception:
+        pass
+    re_, le_, rm, lm = r[4:6], r[6:8], r[10:12], r[12:14]
+    e = float(np.hypot(*(le_ - re_))) + 1e-6; mw = float(np.hypot(*(lm - rm)))
+    smile = float(np.clip((mw / e - 0.84) / 0.24, 0, 1))
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    mx, my = (rm + lm) / 2
+    x0, x1 = int(max(0, mx - mw * 0.45)), int(min(w, mx + mw * 0.45))
+    y0, y1 = int(max(0, my - mw * 0.1)), int(min(h, my + mw * 0.55))
+    fx0, fy0 = int(max(0, r[0])), int(max(0, r[1]))
+    face = g[fy0:int(min(h, r[1] + r[3])), fx0:int(min(w, r[0] + r[2]))]
+    opn = 0.0
+    if x1 > x0 + 4 and y1 > y0 + 4 and face.size:
+        mouth = g[y0:y1, x0:x1].astype(np.float32)
+        dark = float((mouth < 0.42 * float(np.median(face))).mean())
+        opn = float(np.clip((dark - 0.06) / 0.22, 0, 1))
+    if "s" not in C: C["s"] = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_smile.xml")
+    low = g[int(r[1] + r[3] * 0.55):int(min(h, r[1] + r[3])), fx0:int(min(w, r[0] + r[2]))]
+    if low.size and low.shape[0] > 12:
+        try:
+            if len(C["s"].detectMultiScale(low, 1.6, 22, minSize=(int(r[2] * 0.25), int(r[3] * 0.1)))): smile = max(smile, 0.7)
+        except Exception:
+            pass
+    return round(max(smile, opn), 3)
+
+
+def emotion_pass(d, vpool, vres, job):
+    """Найкращим кандидатам з обличчям — оцінка емоції (сміх, крик, здивування, посмішка). Кеш vexpr.json."""
+    import json as _json
+    from .pipeline import _pmap
+    cache = d / "vexpr.json"
+    try: ex = _json.loads(cache.read_text()) if cache.exists() else {}
+    except Exception: ex = {}
+    top = [c for c in sorted(vpool, key=lambda c: -c["score"]) if c.get("face")][:150]
+    need = [c for c in top if f'{c["t"]:.2f}' not in ex]
+    if need:
+        job.step("edit_emotion", 61)
+
+        def one(c):
+            src, ft = vres(c["t"])
+            img = _grab(src, ft, 640, 360)
+            return f'{c["t"]:.2f}', (face_expr(img) if img is not None else 0.0)
+        for k, v in _pmap(one, need, max(2, perf()["render"] + 1)):
+            ex[k] = v
+        cache.write_text(_json.dumps(ex))
+    n = 0
+    for c in vpool:
+        v = ex.get(f'{c["t"]:.2f}')
+        if v is None: continue
+        c["ex"] = v; c["score"] += 1.6 * v; n += v >= 0.5
+    job.log("edit_emotion", n)
+
+
+TASTE = None
+
+
+def _taste_path():
+    from .core import OUT_ROOT
+    return Path(OUT_ROOT) / "_taste.json"
+
+
+def _tfeat(c):
+    return [1.0, float(c.get("fs", 0)) * 10, float(c.get("fw", 0)) * 10, float(c.get("br", 0.5)), float(c.get("sa", 0)),
+            1.0 if c.get("full") else 0.0, 1.0 if c.get("face") else 0.0, float(c.get("txt", 0)), float(c.get("ex", 0))]
+
+
+def taste_record(vpool, kept_t, bad_t):
+    """Лайки/дизлайки кадрів: замінені — погані, решта того ж едіту — хороші. Зберігаються ознаки кадру."""
+    import json as _json
+    p = _taste_path()
+    try: data = _json.loads(p.read_text()) if p.exists() else []
+    except Exception: data = []
+    near = lambda t: min(vpool, key=lambda c: abs(c["t"] - t)) if vpool else None
+    for t, y in [(t, 1) for t in kept_t] + [(t, 0) for t in bad_t]:
+        c = near(t)
+        if c is not None and abs(c["t"] - t) < 2.5: data.append({"x": _tfeat(c), "y": y})
+    p.write_text(_json.dumps(data[-600:]))
+
+
+def taste_apply(vpool, job):
+    """Вчимося на лайках: маленька логістична регресія на ознаках кадру → поправка до оцінки."""
+    import json as _json
+    p = _taste_path()
+    try: data = _json.loads(p.read_text()) if p.exists() else []
+    except Exception: return
+    neg = sum(1 for r in data if r["y"] == 0)
+    if neg < 6 or len(data) - neg < 6: return
+    X = np.array([r["x"] for r in data], np.float32); y = np.array([r["y"] for r in data], np.float32)
+    wgt = np.where(y == 0, len(y) / (2 * neg), len(y) / (2 * (len(y) - neg)))
+    w = np.zeros(X.shape[1], np.float32)
+    for _ in range(400):
+        pr = 1 / (1 + np.exp(-X @ w))
+        w -= 0.1 * (X.T @ ((pr - y) * wgt) / len(y) + 0.01 * w)
+    for c in vpool:
+        pr = 1 / (1 + math.exp(-float(np.dot(_tfeat(c), w))))
+        c["score"] += 2.0 * (pr - 0.5)
+    job.log("edit_taste", neg, len(data) - neg)
 
 
 def _faces(img):
@@ -831,6 +953,10 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
             e = m["energy"][min(range(len(allb)), key=lambda i: abs(allb[i] - bs))] if allb else 0.7
             pats = ([[1, 1, 1, 1], [1, 0.5, 0.5, 1, 1], [0.5, 0.5, 0.5, 0.5, 2], [1, 1, 2], [2, 1, 1], [1, 1, 0.5, 0.5, 1]]
                     if e > 0.5 else [[2, 2], [2, 1, 1], [1, 1, 2]])
+        bps = (style or {}).get("bps")
+        if bps and not (nxt_bar > drop - 0.05 and bs < drop - 0.05):  # темп склейок як у референсі (долей на кадр)
+            allp = [[4], [2, 2], [2, 1, 1], [1, 1, 2], [1, 1, 1, 1], [1, 0.5, 0.5, 1, 1], [0.5, 0.5, 0.5, 0.5, 2], [1, 0.5, 0.5, 1, 0.5, 0.5], [0.5] * 8]
+            pats = sorted(allp, key=lambda p_: abs(4 / len(p_) - bps * (1.3 if bs < drop else 1.0)))[:3]
         pat = rnd.choice(pats); t_ = bs
         for u in pat:
             t_ += u * P
@@ -1049,6 +1175,23 @@ def tint(spr, color):
     o = spr.copy(); o[..., :3] = color; return o
 
 
+def persp_warp(spr, ay, ax=0.0, depth=0.0, f=1100.0):
+    """Спрайт, повернутий у 3D (ay — навколо вертикалі, ax — навколо горизонталі, градуси) і відсунутий углиб."""
+    cv2 = _cv2()
+    h, w = spr.shape[:2]
+    a, b = math.radians(ay), math.radians(ax)
+    pts = []
+    for x, y in ((-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)):
+        x1, z1 = x * math.cos(a), x * math.sin(a)
+        y1, z2 = y * math.cos(b) - z1 * math.sin(b), y * math.sin(b) + z1 * math.cos(b)
+        k = f / (f + z2 + depth)
+        pts.append((x1 * k, y1 * k))
+    pts = np.float32(pts); mn = pts.min(0); mx = pts.max(0)
+    ow, oh = int(mx[0] - mn[0]) + 2, int(mx[1] - mn[1]) + 2
+    M = cv2.getPerspectiveTransform(np.float32([[0, 0], [w, 0], [w, h], [0, h]]), pts - mn)
+    return cv2.warpPerspective(spr, M, (max(2, ow), max(2, oh)), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+
+
 def back_ease(x, s=1.9):
     x = min(1.0, max(0.0, x)) - 1; return 1 + x * x * ((s + 1) * x + s)
 
@@ -1086,7 +1229,7 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
     cy, pb = H * 0.42, 0.0
     if person:
         cy, pb = text_spot(mask, head, rc, id(ev), H * {"behind": 0.2, "build": 0.26, "wide": 0.22, "line": 0.12, "brand": 0.32}.get(st, 0.15))
-        if st in ("line", "build", "karaoke"): pb = 0.0  # фразу з кількох слів не ховаємо — інакше зникає слово посередині
+        if st in ("line", "build", "karaoke", "wrap"): pb = 0.0  # фразу з кількох слів не ховаємо — інакше зникає слово посередині
     pulse = 1 + 0.06 * beat_pulse
     if st == "behind":
         sz = fit_size(txt, FONT_BIG, W * 0.96, hi=560); spr = sprite(txt, sz, FONT_BIG, ev["fill"])
@@ -1299,6 +1442,45 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
         mix = 1 - fade * (1 - (0.08 + 0.92 * canvas))
         frame[:] = (frame * mix[..., None]).astype(np.uint8)
         blend(frame, warp(sprite(txt, sz, FONT_BIG, acc, stroke=4, outline_only=True), s_), W / 2, H * 0.45, None, False, 0.8 * fade)
+    elif st == "wrap" and person:  # текст огинає людину: слова стають у вільне місце поруч із силуетом, рядок за рядком
+        words = ev.get("words") or [(w, ev["t0"] + 0.18 * n_) for n_, w in enumerate(txt.split())]
+        key = ("wrap", id(ev))
+        if key not in rc:
+            lay = []; prof_y = mask.shape[0]
+            y = max(H * 0.1, head["top"] - 40); side = 1 if head["x"] < W / 2 else -1
+            for n_, (w, tw) in enumerate(words):
+                placed = False
+                while y < H * 0.86 and not placed:
+                    yy = int(min(prof_y - 1, y / 2)); row = mask[max(0, yy - 4):min(prof_y, yy + 95)].max(axis=0)  # уся висота слова
+                    xs = np.nonzero(row > 0.4)[0]
+                    xl, xr = (xs.min() * 2 - 26, xs.max() * 2 + 26) if len(xs) else (W / 2, W / 2)
+                    fl, fr_ = xl - 36, W - 36 - xr
+                    sd = side if (fl if side < 0 else fr_) >= 150 else -side
+                    free = fl if sd < 0 else fr_
+                    if free >= 150:
+                        sz = fit_size(w.upper(), FONT_BIG, free, hi=210)
+                        x = (xl - 10) if sd < 0 else (xr + 10)
+                        lay.append((w, tw, x, y + sz * 0.5, sz, sd)); y += sz * 0.98; placed = True; side = -sd
+                    else: y += 40
+            rc[key] = lay
+        for n_, (w, tw, x, y, sz, sd) in enumerate(rc[key]):
+            q = (t - tw) / 0.14
+            if q <= 0: continue
+            spr = sprite(w.upper(), sz, FONT_BIG, acc if n_ % 3 == 1 else white)
+            e_ = back_ease(min(1.0, q)); cx = x - spr.shape[1] / 2 if sd < 0 else x + spr.shape[1] / 2
+            cx += sd * 60 * (1 - min(1.0, q))
+            blend(frame, warp(spr, 0.75 + 0.25 * e_), cx, y, None, False, fade * min(1.0, q * 2))
+    elif st in ("persp", "wrap"):  # слово в 3D-просторі: розвертається в перспективі з глибиною, «стоїть» поруч з людиною
+        sz = fit_size(txt, FONT_BIG, W * (0.7 if person else 0.9), hi=360); spr = sprite(txt, sz, FONT_BIG, ev["fill"])
+        q = ease(dt / 0.5)
+        sd = (1 if hx < W / 2 else -1) if person else 1
+        ay = sd * (70 - 45 * q - 6 * p) ; ax = 14 - 6 * q
+        cx = (hx + sd * W * 0.26) if person else W / 2
+        cx = min(W - 80, max(80, cx)); cy3 = cy + 18 * math.sin(t * 1.3)
+        side_ = tint(spr, tuple(int(c * 0.55) for c in acc))
+        for k_ in range(9, 0, -1):  # екструзія в глибину
+            blend(frame, persp_warp(side_, ay, ax, depth=k_ * 7), cx - sd * k_ * 3, cy3 + k_ * 2, mask, pb * 0.6, fade * 0.9)
+        blend(frame, persp_warp(spr, ay, ax), cx, cy3, mask, pb * 0.6, fade)
     elif st == "wide":  # широке слово вгорі з «відлунням» нижче (1MMS / 1MMS)
         sz = fit_size(txt, FONT_WIDE, W * 0.94, hi=240); spr = sprite(txt, sz, FONT_WIDE, white)
         e_ = ease(dt / 0.2); gap = spr.shape[0] * 0.92
@@ -1355,10 +1537,11 @@ def style_events(ev, rnd, behind_ok, prefer=None):
         if s == "wide" and len(e["txt"]) > 8: s = "behind"
         if e.get("words"):
             r_ = rnd.random()
-            s = "kinetic" if r_ < 0.45 else ("karaoke" if r_ < 0.7 and len(e["words"]) >= 2 else ("line" if (r_ < 0.9 or len(e["words"]) >= 3) else "build"))
+            s = ("kinetic" if r_ < 0.38 else ("karaoke" if r_ < 0.58 and len(e["words"]) >= 2 else ("wrap" if r_ < 0.72 and behind_ok and len(e["words"]) <= 5
+                 else ("line" if (r_ < 0.92 or len(e["words"]) >= 3) else "build"))))
         if e.get("brand"): s = "brand"
         if e.get("hero"):  # ключове слово — великим «авторським» стилем, по черзі
-            s = ("behind", "rise", "knock", "deep", "slam", "glitch", "wide")[k % 7] if behind_ok else ("slam", "deep", "knock", "rgb", "glitch", "wide")[k % 6]
+            s = ("behind", "rise", "knock", "persp", "deep", "slam", "glitch", "wide")[k % 8] if behind_ok else ("slam", "deep", "knock", "persp", "rgb", "glitch", "wide")[k % 7]
             if s == "knock" and len(e["txt"]) > 7: s = "slam"
             if s == "wide" and len(e["txt"]) > 8: s = "behind"
         e["style"] = s
@@ -1434,6 +1617,96 @@ def apply_lyrics_fix(words, text):
     return [{"w": nw, "s": s0 + k * step, "e": s0 + (k + 0.9) * step, "p": 1.0} for k, nw in enumerate(new)]
 
 
+def wave_info(path, L=15.0):
+    """Хвиля треку (800 стовпчиків 0..1) + найсильніший відрізок і дроп — для вибору шматка пісні в інтерфейсі."""
+    total = music_dur(path) or 0
+    y = music_pcm(path, 0.0, total, 8000)
+    n = 800; step = max(1, len(y) // n)
+    pk = np.array([float(np.abs(y[i * step:(i + 1) * step]).max()) if len(y[i * step:(i + 1) * step]) else 0.0 for i in range(n)])
+    pk = (pk / (pk.max() + 1e-9)).round(3).tolist()
+    best = best_segment(path, min(L, max(5.0, total - 0.5)), total) if total > L + 2 else 0.0
+    drop = 0.0
+    try: drop = analyze_music(path, 0.0, min(total - 1, 240.0))["drop"]
+    except Exception: pass
+    return {"dur": total, "peaks": pk, "best": round(best, 2), "drop": round(drop, 2)}
+
+
+def ref_style(path):
+    """Референс чужого едіту → темп склейок (с на кадр), колір, кількість спалахів, найближчий стиль."""
+    import re as _re
+    cv2 = _cv2()
+    dur = music_dur(path) or 0
+    r = subprocess.run([ffmpeg(), "-v", "info", "-i", str(path), "-vf", "scale=320:-2,select='gt(scene,0.3)',showinfo", "-an", "-f", "null", "-"],
+                       capture_output=True, text=True, errors="replace").stderr
+    cuts = len(_re.findall(r"pts_time:", r))
+    shot_len = dur / (cuts + 1) if dur else 1.0
+    cap = cv2.VideoCapture(str(path)); tot = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+    sats, vals, warm, con, means = [], [], [], [], []
+    for k in range(0, tot, max(1, tot // 60)):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, k); ok, fr = cap.read()
+        if not ok: continue
+        fr = cv2.resize(fr, (160, int(160 * fr.shape[0] / fr.shape[1])))
+        hsv = cv2.cvtColor(fr, cv2.COLOR_BGR2HSV).astype(np.float32)
+        sats.append(hsv[..., 1].mean() / 255); vals.append(hsv[..., 2].mean() / 255); con.append(hsv[..., 2].std())
+        warm.append(float(fr[..., 2].mean() - fr[..., 0].mean())); means.append(float(hsv[..., 2].mean()))
+    cap.release()
+    if not sats: return {"shot_len": round(shot_len, 2), "cuts": cuts}
+    sat, val, wm, ct = float(np.mean(sats)), float(np.mean(vals)), float(np.mean(warm)), float(np.mean(con))
+    flash = int(sum(1 for a, b_ in zip(means, means[1:]) if b_ - a > 70))
+    if sat < 0.16: grade = "moody"
+    elif ct < 42: grade = "fade"
+    elif wm < -6: grade = "teal" if ct > 55 else "cold"
+    elif sat > 0.42 and ct > 60: grade = "punch"
+    else: grade = "warm"
+    if sat < 0.12: style = "noir"
+    elif shot_len >= 1.4: style = "cinema"
+    elif shot_len < 0.5 or flash >= 4: style = "hype"
+    elif val < 0.35 and sat > 0.3: style = "neon"
+    else: style = "pop"
+    return {"shot_len": round(shot_len, 2), "cuts": cuts, "grade": grade, "style": style, "flash": min(6, flash),
+            "sat": round(sat, 2), "warm": round(wm, 1), "contrast": round(ct, 1)}
+
+
+def export_project(out, parts, shots, ev, music, start, T, o):
+    """Проєкт для ручної доправки: кожен кадр окремим файлом (вже кадрований, без ефектів), відрізок треку,
+    таймлайн FCP XML (відкривають Premiere Pro і DaVinci Resolve) і слова пісні в .srt.
+    CapCut XML не читає — туди просто перетягуєш clips/ по порядку й music."""
+    import shutil as _sh
+    from xml.sax.saxutils import escape
+    pdir = out.with_name(out.stem + "_project"); cdir = pdir / "clips"
+    _sh.rmtree(pdir, ignore_errors=True); cdir.mkdir(parents=True)
+    items, pos = [], 0
+    for k, (sh, pr) in enumerate(zip(shots, parts)):
+        f = cdir / f"{k + 1:03d}.mp4"; _sh.copy(pr["file"], f)
+        n = pr["n"]; items.append((f, pos, n)); pos += n
+    mus = None
+    if music:
+        mus = pdir / "music.m4a"
+        subprocess.run([ffmpeg(), "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{T:.3f}", "-i", str(music), "-c:a", "aac", "-b:a", "256k", str(mus)])
+    rate = f"<rate><timebase>{FPS}</timebase><ntsc>FALSE</ntsc></rate>"
+    clips = []
+    for k, (f, st_, n) in enumerate(items):
+        clips.append(f'<clipitem id="c{k}"><name>{f.name}</name><duration>{n}</duration>{rate}<start>{st_}</start><end>{st_ + n}</end>'
+                     f'<in>0</in><out>{n}</out><file id="f{k}"><name>{f.name}</name><pathurl>{escape(f.resolve().as_uri())}</pathurl>{rate}'
+                     f'<duration>{n}</duration><media><video><samplecharacteristics><width>{W}</width><height>{H}</height></samplecharacteristics></video></media></file></clipitem>')
+    aud = ""
+    if mus and mus.exists():
+        na = int(round(T * FPS))
+        aud = (f'<audio><track><clipitem id="a0"><name>music.m4a</name><duration>{na}</duration>{rate}<start>0</start><end>{na}</end><in>0</in><out>{na}</out>'
+               f'<file id="fa"><name>music.m4a</name><pathurl>{escape(mus.resolve().as_uri())}</pathurl>{rate}<duration>{na}</duration>'
+               f'<media><audio><channelcount>2</channelcount></audio></media></file></clipitem></track></audio>')
+    xml = (f'<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE xmeml>\n<xmeml version="5"><sequence id="seq"><name>{escape(out.stem)}</name><duration>{pos}</duration>{rate}'
+           f'<media><video><format><samplecharacteristics>{rate}<width>{W}</width><height>{H}</height></samplecharacteristics></format>'
+           f'<track>{"".join(clips)}</track></video>{aud}</media></sequence></xmeml>')
+    (pdir / "timeline.xml").write_text(xml, encoding="utf-8")
+    ts = lambda x: f"{int(x // 3600):02d}:{int(x % 3600 // 60):02d}:{int(x % 60):02d},{int(round((x % 1) * 1000)) % 1000:03d}"
+    srt = [f"{k + 1}\n{ts(e['t0'])} --> {ts(e['t1'])}\n{e['txt']}\n" for k, e in enumerate(ev)]
+    (pdir / "text.srt").write_text("\n".join(srt), encoding="utf-8")
+    (pdir / "README.txt").write_text("Premiere Pro / DaVinci Resolve: File > Import > timeline.xml\n"
+                                    "CapCut: перетягни clips/001…NNN по порядку і music.m4a, текст — з text.srt\n", encoding="utf-8")
+    return str(pdir)
+
+
 def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     import json as _json
     cv2 = _cv2()
@@ -1483,15 +1756,62 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
             cache.write_text(_json.dumps({"v": 12, "ar": ar_, "items": vpool}))
         for v in vpool:  # моменти, де щось відбувається за звуком/чатом, — трохи вище
             if any(abs(v["t"] - c["peak"]) < 4 for c in pool if c.get("final", 0) > 0.5): v["score"] += 0.6
-        if len(vpool) < 8: vpool = None
+    extras = []  # другі джерела (інші завантажені відео з бібліотеки): їхній час зсунутий на k·1e6 — одна «віртуальна» шкала
+    for k_, xd in enumerate(o.get("edit_extra") or []):
+        try:
+            xm = _json.loads((Path(xd) / "meta.json").read_text(encoding="utf-8"))
+            xv = xm.get("video")
+            if not xv or not Path(xv).exists(): continue
+            xc = Path(xd) / "vscan.json"
+            try: xp = _json.loads(xc.read_text()) if xc.exists() else None
+            except Exception: xp = None
+            if isinstance(xp, dict) and xp.get("v") == 12 and xp.get("ar", "9:16") == ar_: xp = xp["items"]
+            else:
+                job.step("edit_scan", 60)
+                xp = scan_video(xv, xm.get("duration") or 0, skip=(xm.get("info") or {}).get("skip") or [], job=job)
+                xc.write_text(_json.dumps({"v": 12, "ar": ar_, "items": xp}))
+            base = (k_ + 1) * 1e6
+            extras.append((base, xv, xm.get("video_offset", 0.0)))
+            vpool = (vpool or []) + [dict(c, t=c["t"] + base) for c in xp]
+            job.log("edit_extra", Path(xv).parent.name, len(xp))
+        except Exception as e:
+            print("extra source:", e)
+    if vpool and o.get("edit_ban"):  # кадри, які ти забракував
+        ban = [float(x) for x in o["edit_ban"]]
+        vpool = [c for c in vpool if all(abs(c["t"] - b_) > 2.0 for b_ in ban)] or vpool
+    if vpool is not None and len(vpool) < 8: vpool = None
+
+    def vres(t):
+        """Віртуальний час → (файл, секунда в ньому)."""
+        for base, xv, xo in reversed(extras):
+            if t >= base - 1: return xv, max(0.0, t - base - xo)
+        return meta["video"], t - meta.get("video_offset", 0.0)
+    if vpool and o.get("edit_emotion", True):
+        try: emotion_pass(d, vpool, vres, job)
+        except Exception as e: print("emotion:", e)
+    if vpool:
+        pin_ = o.get("edit_pin") or {}
+        if pin_.get("replace") and pin_.get("shots"):
+            try: taste_record(vpool, [t for k_, t in enumerate(pin_["shots"]) if k_ not in pin_["replace"]], [pin_["shots"][k_] for k_ in pin_["replace"] if k_ < len(pin_["shots"])])
+            except Exception as e: print("taste:", e)
+        try: taste_apply(vpool, job)
+        except Exception as e: print("taste:", e)
     genre, mood = track_profile(m)
     job.log("edit_genre", genre)
     if o.get("edit_style") in FX.STYLES: sname = o["edit_style"]
     elif o.get("edit_mode") == "cinema": sname = "cinema"
-    else: sname = GENRE_STYLE.get(genre) or rnd.choice(list(FX.STYLES))
-    if isinstance(sname, list): sname = rnd.choice(sname)
-    style = FX.STYLES[sname]
+    else: sname = GENRE_STYLE.get(genre) or list(FX.STYLES)
+    if isinstance(sname, list): sname = random.Random((seed or 1) * 31 + 7).choice(sname)  # окремий генератор: план склейок не залежить від вибору стилю
+    style = dict(FX.STYLES[sname])
     o = dict(o)
+    ref = o.get("edit_ref") or {}
+    if ref:  # референс стилю: темп склейок, колір, стиль
+        if ref.get("shot_len"): style["bps"] = max(0.4, min(6.0, float(ref["shot_len"]) / max(0.2, m["period"])))
+        if ref.get("style") in FX.STYLES and o.get("edit_style") not in FX.STYLES and o.get("edit_mode") != "cinema":
+            sname = ref["style"]; style = dict(FX.STYLES[sname], bps=style.get("bps"))
+        if ref.get("grade") and (o.get("edit_grade") or "auto") == "auto": o["edit_grade"] = ref["grade"]
+        if ref.get("flash") is not None: style["flash"] = int(ref["flash"])
+        job.log("edit_ref", round(float(ref.get("shot_len") or 0), 2), sname)
     if (o.get("edit_grade") or "auto") == "auto": o["edit_grade"] = mood  # цвет под настроение трека
     if o.get("edit_mode") == "cinema" and o["edit_grade"] in ("punch",): o["edit_grade"] = "teal"
     job.log("edit_style", sname)
@@ -1499,7 +1819,11 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     words = []
     if tm == "lyrics":
         job.step("edit_lyrics", 62)
-        try: words = lyrics(music, start, L, o, job)
+        lc = d / f"lyrics_{Path(str(music)).stem[:20]}_{start:.1f}_{L:.1f}.json"
+        try:
+            words = _json.loads(lc.read_text(encoding="utf-8")) if lc.exists() else None
+            if words is None:
+                words = lyrics(music, start, L, o, job); lc.write_text(_json.dumps(words), encoding="utf-8")
         except Exception as e: print("lyrics:", e); words = []
         if o.get("lyrics_fix"):  # ручная правка текста песни: те же тайминги, свои слова
             words = apply_lyrics_fix(words, o["lyrics_fix"])
@@ -1511,9 +1835,21 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
             if sh["fx"] in ("glitch", "pixel", "spin", "whip"): sh["fx"] = rnd.choice(["dip", "zoom", "slide", "mask"])
     for sh in shots:  # іскри/пил у повітрі на дропі й піках
         sh["sparks"] = sh.get("sec") in ("drop", "peak") and sname in ("hype", "neon", "cinema") and rnd.random() < 0.45
+    pinned = set()
+    pin = o.get("edit_pin") or {}
+    if vpool and pin.get("shots") and len(pin["shots"]) == len(shots):  # той самий план, міняємо лише вибрані куски
+        rep = set(pin.get("replace") or [])
+        for k_, sh in enumerate(shots):
+            if k_ not in rep: sh["t"] = float(pin["shots"][k_]); pinned.add(k_)
+        usedp = [float(x) for x in pin["shots"]]
+        for k_ in sorted(rep):
+            if k_ >= len(shots): continue
+            c = next((c for c in sorted(vpool, key=lambda c: -c["score"]) if c.get("face")
+                      and all(abs(c["t"] - u) > 3 for u in usedp)), None)
+            if c: shots[k_]["t"] = max(0.0, c["t"] - 0.15); usedp.append(c["t"])
     if vpool and meta.get("video"):
         try:
-            nf = verify_shots(shots, vpool, meta["video"], meta.get("video_offset", 0.0), job)
+            nf = verify_shots([sh for k_, sh in enumerate(shots) if k_ not in pinned], vpool, vres, job)
             if nf: job.log("edit_fixed", nf)
         except Exception as e:
             print("verify_shots:", e)
@@ -1577,15 +1913,15 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
 
     def one(i):
         sh = shots[i]
-        if sh["k"] < 0: src, ft = meta["video"], sh["t"] - meta.get("video_offset", 0.0)
+        if sh["k"] < 0: src, ft = vres(sh["t"])
         else:
             src, off, s0 = src_of(sh["k"]); ft = max(0.0, off + sh["t"] - s0)
         # остаточна перевірка саме тих секунд (з хвостом для переходу), що підуть у ролик: гра / субтитри / темрява / без людини → інший момент
         if sh["k"] < 0 and vpool:
             span = (sh["b"] - sh["a"]) * sh["speed"]
-            qq = _shot_quality(src, ft, span)
+            qq = _shot_quality(src, ft, span) if i not in pinned else 0.0
             if qq <= -3:
-                off_ = meta.get("video_offset", 0.0); new = None
+                new = None
                 for _ in range(6):  # шукаємо заміну, перевіряючи джерело ДО рендеру
                     with rlock:
                         alt = next((c for c in sorted(vpool, key=lambda c: -c["score"]) if c.get("face")
@@ -1593,11 +1929,11 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                         if alt is None: break
                         used_t.append(alt["t"])
                     ta = max(0.0, alt["t"] - 0.15)
-                    if _shot_quality(src, ta - off_, span) > -3: new = ta; break
+                    if _shot_quality(*vres(ta), span) > -3: new = ta; break
                 print(f"shot {i}: q={qq:.1f} → {new}", flush=True)
-                if new is not None: sh["t"] = new; ft = new - off_
+                if new is not None: sh["t"] = new; src, ft = vres(new)
         r = render_shot(src, ft, sh, o, job, wk / f"s{i:03d}.mp4", cam=cam if (cam and i % 3 != 2) else None,
-                        logos=logos if meta.get("video") else None)
+                        logos=logos if (meta.get("video") and src == meta["video"]) else None)
         done[0] += 1; job.pct = 64 + 14 * done[0] / len(shots); job.sub = f"{done[0]}/{len(shots)}"
         return r
     parts = _pmap(one, list(range(len(shots))), max(1, perf()["render"] + 1))
@@ -1817,6 +2153,14 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
         try: pe.kill()
         except Exception: pass
         raise
+    try:
+        job.extra["edit_info"] = {"seed": seed, "shots": [round(sh["t"], 2) for sh in shots], "cuts": [[round(sh["a"], 2), round(sh["b"], 2)] for sh in shots],
+                                  "lyrics": " ".join(w["w"] for w in words) if words else "", "style": sname, "genre": genre}
+    except Exception as e:
+        print("edit_info:", e)
+    if o.get("edit_export"):
+        try: job.extra["edit_project"] = export_project(out, parts, shots, ev, music, start, T, o)
+        except Exception as e: print("export:", e); job.log("fx_err", "export", str(e)[:90])
     for p in parts: Path(p["file"]).unlink(missing_ok=True)
     subprocess.run([ffmpeg(), "-y", "-v", "error", "-ss", f"{min(1.5, T / 2):.2f}", "-i", str(out), "-frames:v", "1",
                     "-vf", "scale=360:-2", str(out.with_name(out.stem + "_preview.jpg"))], capture_output=True)

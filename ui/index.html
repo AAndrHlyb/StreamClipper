@@ -112,6 +112,10 @@
           <input type="file" id="emusic" accept="audio/*,video/*" class="hide"><span class="hint" id="emname"></span></div>
         </div>
         <label class="f"><span data-t="music_start"></span><input type="number" id="emstart" min="0" step="0.5" data-tp="auto_ph"></label>
+        <div class="f wide hide" id="wavef"><span data-t="e_seg"></span>
+          <div class="wave" id="wavebox"><canvas id="wavec" height="72"></canvas></div>
+          <div class="row"><button class="ghost" id="wplay" type="button"><span id="wplayl" data-t="e_listen"></span></button><button class="ghost" id="wbest" type="button"><span data-t="e_best"></span></button><button class="ghost" id="wdrop" type="button"><span data-t="e_dropbtn"></span></button><span class="hint" id="wpos"></span></div>
+          <span class="hint" data-t="e_seg_d"></span><audio id="waud" preload="auto"></audio></div>
         <label class="f"><span data-t="e_nick"></span><input type="text" id="enick" data-tp="e_nick_ph" maxlength="32"><span class="hint" data-t="e_nick_d"></span></label>
         <div class="f"><span data-t="e_text"></span>
           <div class="seg" id="etm"><button data-v="lyrics" data-t="et_lyrics"></button><button data-v="custom" data-t="et_custom"></button><button data-v="none" data-t="et_none"></button></div>
@@ -124,9 +128,13 @@
         <div class="f"><span data-t="e_style"></span>
           <div class="seg" id="estyle"><button data-v="auto" data-t="es_auto"></button><button data-v="hype" data-t="es_hype"></button><button data-v="cinema" data-t="es_cinema"></button><button data-v="neon" data-t="es_neon"></button><button data-v="pop" data-t="es_pop"></button><button data-v="noir" data-t="es_noir"></button></div>
         </div>
-        <div class="f"><span data-t="e_grade"></span>
+        <div class="f wide"><span data-t="e_grade"></span>
           <div class="seg" id="egrade"><button data-v="auto" data-t="es_auto"></button><button data-v="warm" data-t="g_warm"></button><button data-v="cold" data-t="g_cold"></button><button data-v="punch" data-t="g_punch"></button><button data-v="teal" data-t="g_teal"></button><button data-v="moody" data-t="g_moody"></button><button data-v="fade" data-t="g_fade"></button><button data-v="none" data-t="g_none"></button></div>
         </div>
+        <div class="f"><span data-t="e_ref"></span>
+          <div class="row"><label class="btn" for="eref"><svg class="i"><use href="#plus"/></svg><span data-t="e_ref_up"></span></label><input type="file" id="eref" accept="video/*" class="hide"><span class="hint" id="erefn"></span></div>
+          <span class="hint" data-t="e_ref_d"></span></div>
+        <div class="f"><span data-t="e_extra"></span><div class="chk" id="eextra"></div><span class="hint" data-t="e_extra_d"></span></div>
         <div class="f"><span data-t="e_mode"></span>
           <div class="seg" id="emode"><button data-v="normal" data-t="em_norm"></button><button data-v="drop" data-t="em_drop"></button><button data-v="cinema" data-t="em_cine"></button></div>
         </div>
@@ -136,6 +144,7 @@
         <label class="x"><input type="checkbox" id="edelogo" checked><i></i><div><b data-t="e_delogo"></b><span data-t="e_delogo_d"></span></div></label>
         <label class="x"><input type="checkbox" id="eloop" checked><i></i><div><b data-t="e_loop"></b><span data-t="e_loop_d"></span></div></label>
         <label class="x"><input type="checkbox" id="evramp" checked><i></i><div><b data-t="e_vramp"></b><span data-t="e_vramp_d"></span></div></label>
+        <label class="x"><input type="checkbox" id="eexport"><i></i><div><b data-t="e_export"></b><span data-t="e_export_d"></span></div></label>
         <label class="x"><input type="checkbox" id="emute"><i></i><div><b data-t="e_mute"></b><span data-t="e_mute_d"></span></div></label>
       </div>
     </div>
@@ -215,7 +224,13 @@
       <button class="ghost" onclick="api('/api/open',{path:cur.dir+'/out'})"><svg class="i"><use href="#folder"/></svg><span data-t="open_dir"></span></button></div>
     <div class="tl" id="tl"></div>
     <div class="comp hide" id="compbox"><video controls preload="metadata" id="compv"></video>
-      <div class="row mt12"><b id="compn"></b><span class="tc" id="compd"></span><div class="sp"></div><button class="ghost hide" id="compmore" onclick="reEdit()"><svg class="i"><use href="#refresh"/></svg><span data-t="more_var"></span></button><a class="btn ghost" id="compdl"><svg class="i"><use href="#dl"/></svg><span data-t="download"></span></a></div></div>
+      <div class="row mt12"><b id="compn"></b><span class="tc" id="compd"></span><div class="sp"></div><button class="ghost hide" id="compmore" onclick="reEdit()"><svg class="i"><use href="#refresh"/></svg><span data-t="more_var"></span></button><a class="btn ghost" id="compdl"><svg class="i"><use href="#dl"/></svg><span data-t="download"></span></a></div>
+      <div class="epanel hide" id="epanel">
+        <div class="lbl" data-t="e_shots"></div><div class="thumbs" id="ethumbs"></div>
+        <div class="row mt8"><button class="ghost" id="erep" disabled onclick="replaceShots()"><span data-t="e_replace"></span></button><button class="ghost" onclick="reEdit(3)"><span data-t="e_three"></span></button><button class="ghost hide" id="eproj"><span data-t="e_proj"></span></button><button class="ghost" onclick="reuseOpts()"><span data-t="e_reuse"></span></button></div>
+        <div id="elyrw"><div class="lbl mt12" data-t="e_lyr"></div><textarea id="elyr" rows="3"></textarea>
+        <div class="row mt8"><button class="ghost" onclick="fixLyrics()"><span data-t="e_lyr_go"></span></button><span class="hint" data-t="e_lyr_d"></span></div></div>
+      </div></div>
     <div class="res" id="res"></div>
     <div class="hint mt16"><span data-t="captions_note"></span>. <span data-t="rate_note"></span></div>
     <div class="after hide" id="after">
