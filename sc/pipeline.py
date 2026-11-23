@@ -94,8 +94,19 @@ def history_vods(streamer):
 
 
 # ------------------------------------------------------------------ основной вход
+def check_fresh():
+    """Код на диску новіший за запущений процес (оновили, але не перезапустили) — нові правки НЕ працюють. Кажемо прямо."""
+    from . import core as C
+    try: disk = (C.APP_DIR / "VERSION").read_text().strip()
+    except Exception: return
+    if disk and disk != C.VERSION:
+        print(f"\n!!! Програму оновлено до {disk}, а працює {C.VERSION}. Закрий це вікно й запусти Start-Windows.bat / Start-Mac.command ще раз.\n", flush=True)
+        raise RuntimeError(f"Програму оновлено до {disk}, а працює стара {C.VERSION} — закрий вікно програми й запусти її знову")
+
+
 def run_job(job):
     try:
+        check_fresh()
         if job.kind == "more": _more(job)
         else: _run(job)
         if job.state == "running": job.state = "done"

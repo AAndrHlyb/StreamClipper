@@ -352,7 +352,7 @@ class H(BaseHTTPRequestHandler):
 
                 def go2():
                     try:
-                        P.reedit(b["dir"], j); j.state = "done"; j.stage, j.pct = "done", 100
+                        P.check_fresh(); P.reedit(b["dir"], j); j.state = "done"; j.stage, j.pct = "done", 100
                     except Exception as e:
                         j.state, j.err = "error", str(e)
                 threading.Thread(target=go2, daemon=True).start()
