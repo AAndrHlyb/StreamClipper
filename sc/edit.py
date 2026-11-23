@@ -323,6 +323,26 @@ def _shot_quality(src, t, span):
     return q
 
 
+def _part_bad(path):
+    """Перевірка відрендереного шматка (вже кроп під формат): 4 кадри. -> причина або ''."""
+    cv2 = _cv2()
+    cap = cv2.VideoCapture(str(path))
+    tot = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+    face = 0; why = ""
+    for k in (0.05, 0.35, 0.65, 0.95):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(tot * k))
+        ok, fr = cap.read()
+        if not ok: continue
+        small = cv2.resize(fr, (640, int(640 * fr.shape[0] / fr.shape[1])))
+        q = frame_quality(small)
+        face += q["face"]
+        if q["hard"]: why = "hard"
+    cap.release()
+    if why: return why
+    if face < 2: return "noperson"
+    return ""
+
+
 def verify_shots(shots, vpool, src, off, job=None):
     """Кадри обирались за пробними кадрами; тут перевіряємо саме ті секунди, що підуть у ролик.
     Слабкий шот міняємо на наступного найкращого кандидата (теж перевіреного). -> скільки замінено"""
@@ -1448,6 +1468,9 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     from .pipeline import _pmap
     done = [0]
 
+    import threading as _thr
+    rlock = _thr.Lock(); used_t = [sh["t"] for sh in shots]
+
     def one(i):
         sh = shots[i]
         if sh["k"] < 0: src, ft = meta["video"], sh["t"] - meta.get("video_offset", 0.0)
@@ -1455,6 +1478,20 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
             src, off, s0 = src_of(sh["k"]); ft = max(0.0, off + sh["t"] - s0)
         r = render_shot(src, ft, sh, o, job, wk / f"s{i:03d}.mp4", cam=cam if (cam and i % 3 != 2) else None,
                         logos=logos if meta.get("video") else None)
+        # остаточна перевірка ГОТОВОГО шматка (саме те, що піде в ролик): гра / субтитри / темрява / без людини → інший момент
+        if sh["k"] < 0 and vpool:
+            for _ in range(4):
+                bad = _part_bad(r["file"])
+                if not bad: break
+                with rlock:
+                    alt = next((c for c in sorted(vpool, key=lambda c: -c["score"]) if c.get("face")
+                                and all(abs(c["t"] - u) > 2.5 for u in used_t)), None)
+                    if alt is None: break
+                    used_t.append(alt["t"])
+                print(f"shot {i}: {bad} → {alt['t']:.1f}", flush=True)
+                sh["t"] = max(0.0, alt["t"] - 0.15); ft = sh["t"] - meta.get("video_offset", 0.0)
+                r = render_shot(src, ft, sh, o, job, wk / f"s{i:03d}.mp4", cam=cam if (cam and i % 3 != 2) else None,
+                                logos=logos if meta.get("video") else None)
         done[0] += 1; job.pct = 64 + 14 * done[0] / len(shots); job.sub = f"{done[0]}/{len(shots)}"
         return r
     parts = _pmap(one, list(range(len(shots))), max(1, perf()["render"] + 1))
