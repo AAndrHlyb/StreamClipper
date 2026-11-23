@@ -459,17 +459,39 @@ def tr_splitin(prev, fr, q, vel=1.0):
     return out
 
 
+def tr_strips(prev, fr, q, vel=1.0, n=3, horiz=True):
+    """Новий кадр заїжджає смугами (3 шт.) з різних боків по черзі — кожна смуга трохи запізнюється, край змазаний."""
+    if prev is None: return fr
+    cv2 = _cv2()
+    out = (prev.astype(np.float32) * (1 - 0.3 * min(1.0, q))).astype(np.uint8)
+    new = cv2.blur(fr, (int(9 + 60 * vel) | 1, 1) if horiz else (1, int(9 + 60 * vel) | 1)) if vel > 0.05 else fr
+    for k in range(n):
+        qk = min(1.0, max(0.0, (q - k * 0.12) / (1 - 0.24)))
+        if qk <= 0: continue
+        if horiz:
+            y0, y1 = k * H // n, (k + 1) * H // n
+            off = int(round((1 - qk) * W))
+            if k % 2 == 0: out[y0:y1, off:] = new[y0:y1, :W - off]
+            else: out[y0:y1, :W - off] = new[y0:y1, off:]
+        else:
+            x0, x1 = k * W // n, (k + 1) * W // n
+            off = int(round((1 - qk) * H))
+            if k % 2 == 0: out[off:, x0:x1] = new[:H - off, x0:x1]
+            else: out[:H - off, x0:x1] = new[off:, x0:x1]
+    return out
+
+
 # ------------------------------------------------------------------ стилі едіту (набір правил, з якого кожна генерація бере свій варіант)
 STYLES = {
-    "hype":    {"trans": ["zoom", "glitch", "whip", "spin", "slide"], "looks": ["outline", "echo", "mirror", "colorpop", None, None],
+    "hype":    {"trans": ["zoom", "glitch", "whip", "spin", "slide", "strips"], "looks": ["outline", "echo", "mirror", "colorpop", None, None],
                 "grade": ["punch", "warm"], "text": ["slam", "slam", "stack", "rgb", "behind", "deep", "pop", "rise"], "cutout": 0.35, "flash": 3},
-    "cinema":  {"trans": ["zoom", "iris", "whip", "slide"], "looks": ["letterbox", "bokeh", "spotlight", None, None],
+    "cinema":  {"trans": ["zoom", "iris", "whip", "slide", "strips"], "looks": ["letterbox", "bokeh", "spotlight", None, None],
                 "grade": ["warm", "cold"], "text": ["waterfall", "behind", "rise", "wipe", "split", "behind"], "cutout": 0.2, "flash": 1},
-    "neon":    {"trans": ["glitch", "pixel", "zoom"], "looks": ["outline", "spotlight", "echo", "tunnel", None],
+    "neon":    {"trans": ["glitch", "pixel", "zoom", "slide", "strips"], "looks": ["outline", "spotlight", "echo", "tunnel", None],
                 "grade": ["cold", "punch"], "text": ["rgb", "orbit", "behind", "slam", "deep", "rise"], "cutout": 0.3, "flash": 2},
-    "pop":     {"trans": ["whip", "shutter", "zoom", "iris", "slide", "splitin"], "looks": ["colorpop", "popframe", "mirror", None, None],
+    "pop":     {"trans": ["whip", "shutter", "zoom", "iris", "slide", "splitin", "strips"], "looks": ["colorpop", "popframe", "mirror", None, None],
                 "grade": ["punch", "warm"], "text": ["stack", "pop", "deep", "slam", "orbit", "rise"], "cutout": 0.45, "flash": 2},
-    "noir":    {"trans": ["zoom", "shutter", "glitch", "slide"], "looks": ["bwred", "bwred", "spotlight", "bokeh", None],
+    "noir":    {"trans": ["zoom", "shutter", "glitch", "slide", "strips"], "looks": ["bwred", "bwred", "spotlight", "bokeh", None],
                 "grade": ["none"], "text": ["behind", "rise", "slam", "deep", "waterfall"], "cutout": 0.25, "flash": 2},
 }
 
@@ -506,8 +528,9 @@ TRANS_RULES = {
     "pixel":   lambda c: 0.4 * c["br"] + 0.3 * _ON(c, "build"),
     "iris":    lambda c: 0.6 * _ON(c, "intro", "resolve", "build") + 0.3 * (1 - c["en"]),
     "shutter": lambda c: 0.5 * _ON(c, "build") + 0.3 * c["busy"],
-    "slide":   lambda c: 0.75 + 0.3 * _ON(c, "build", "peak") + 0.2 * (c["d"] >= 0.5),
-    "splitin": lambda c: 0.5 + 0.3 * _ON(c, "peak") + 0.2 * c["busy"],
+    "slide":   lambda c: 0.9 + 0.35 * _ON(c, "build", "peak", "drop") + 0.3 * (c["d"] >= 0.5),  # наїзд кадру на кадр — фірмовий
+    "splitin": lambda c: 0.6 + 0.35 * _ON(c, "peak") + 0.2 * c["busy"] + 0.2 * (c["d"] >= 0.5),
+    "strips":  lambda c: 0.55 + 0.35 * _ON(c, "peak", "drop") + 0.25 * c["busy"] + 0.2 * (c["d"] >= 0.5),
     "dip":     lambda c: 0.9 * _ON(c, "intro", "resolve") * (1 - c["en"]) - 0.6 * _ON(c, "peak", "drop"),
 }
 HIT_RULES = {  # акцент на початку шоту на сильну долю

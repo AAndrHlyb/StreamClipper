@@ -1484,13 +1484,16 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 if prev is not None and fx == "iris" and j < 6: fr = safe("iris", lambda: FX.tr_iris(prev, fr, (j + 1) / 6), fr)
                 if fx == "dip" and j < 7: fr = (fr * ((j + 1) / 8)).astype(np.uint8)
                 if nfx == "dip" and tail < 5: fr = (fr * ((tail + 1) / 6)).astype(np.uint8)
-                if prev is not None and fx in ("slide", "splitin"):
+                if prev is not None and fx in ("slide", "splitin", "strips"):
                     K = max(6, min(12, int(pr["n"] * 0.45)))
                     if j < K:
                         if "sdir" not in sst: sst["sdir"] = rnd.choice(["up", "up", "down", "left", "right"]); sst["old"] = prev.copy()
                         prev_out = sst["old"]
                         qv, vel = FX.slide_curve(j, K)
                         if fx == "slide": fr = safe("slide", lambda: FX.tr_slide(prev_out, fr, qv, sst["sdir"], vel), fr)
+                        elif fx == "strips":
+                            if "shz" not in sst: sst["shz"] = rnd.random() < 0.6
+                            fr = safe("strips", lambda: FX.tr_strips(prev_out, fr, qv, vel, 3, sst["shz"]), fr)
                         else: fr = safe("splitin", lambda: FX.tr_splitin(prev_out, fr, qv, vel), fr)
                 if prev is not None and fx == "shutter" and j < 6: fr = safe("shutter", lambda: FX.tr_shutter(prev, fr, (j + 1) / 6), fr)
                 if leak is not None:
