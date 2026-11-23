@@ -298,15 +298,63 @@ def _stream_url(url):
     _SRC[url] = (_t.time(), out.split()[0]); return _SRC[url][1]
 
 
-def frame_at(info, t, dest):
-    ff = ffmpeg()
-    if info["platform"] == "file":
-        src, seek = info["url"], max(0, t)
-    else:
-        src, seek = _stream_url(info["url"]), (None if info.get("kind") == "live" else max(0, t))
-    cmd = [ff, "-y", "-v", "error", "-max_error_rate", "1"]
+def _local_video(info):
+    """Це відео вже скачане раніше (для едіту) — кадр беремо з диска, а не з YouTube."""
+    try:
+        from .core import OUT_ROOT
+        keys = {info.get("url"), info.get("yt_id")} - {None, ""}
+        for mf in sorted(Path(OUT_ROOT).glob("*/meta.json"), key=lambda p: -p.stat().st_mtime)[:60]:
+            try: m = json.loads(mf.read_text(encoding="utf-8"))
+            except Exception: continue
+            mi = m.get("info") or {}
+            if ({m.get("vid"), m.get("url"), mi.get("yt_id")} & keys) and m.get("video") and Path(m["video"]).exists():
+                return m["video"]
+    except Exception:
+        pass
+    return None
+
+
+def _ff_frame(src, seek, dest):
+    cmd = [ffmpeg(), "-y", "-v", "error", "-max_error_rate", "1"]
     if seek is not None: cmd += ["-ss", f"{seek:.1f}"]
-    cmd += ["-i", src, "-frames:v", "1", "-vf", "scale=960:-2", str(dest)]
+    cmd += ["-i", str(src), "-frames:v", "1", "-vf", "scale=960:-2", str(dest)]
     code, _, err = capture(cmd, timeout=120)
     if code or not Path(dest).exists(): raise RuntimeError(err.strip()[-200:] or "frame")
     return dest
+
+
+def frame_at(info, t, dest):
+    """Кадр у момент t. Порядок: локальний файл → пряме посилання (з повтором, якщо протухло) →
+    yt-dlp качає 1 секунду сам (YouTube часто дає 403 на пряме посилання для ffmpeg)."""
+    if info["platform"] == "file":
+        return _ff_frame(info["url"], max(0, t), dest)
+    live = info.get("kind") == "live"
+    loc = None if live else _local_video(info)
+    if loc:
+        try: return _ff_frame(loc, max(0, t), dest)
+        except Exception: pass
+    seek = None if live else max(0, t)
+    err = ""
+    for attempt in range(2):
+        try:
+            return _ff_frame(_stream_url(info["url"]), seek, dest)
+        except Exception as e:
+            err = str(e); _SRC.pop(info["url"], None)  # протухле/заборонене посилання — беремо нове
+            if "403" not in err and "Forbidden" not in err and attempt == 0 and "expired" not in err: break
+    if not live:
+        tmp = Path(dest).with_suffix(".part.mp4")
+        try:
+            a = max(0, t)
+            code, _, e2 = capture([*YTDLP, "--no-warnings", "-f", "bv*[height<=720]/b[height<=720]/b", "--download-sections",
+                                   f"*{a:.1f}-{a + 1.5:.1f}", "--force-keyframes-at-cuts", "--ffmpeg-location", ffmpeg(),
+                                   "-o", str(tmp), info["url"]], timeout=180)
+            cand = [p for p in Path(dest).parent.glob(tmp.stem + "*") if p.stat().st_size > 0]
+            if cand: return _ff_frame(cand[0], None, dest)
+            err = e2.strip()[-200:] or err
+        except Exception as e:
+            err = str(e)[-200:] or err
+        finally:
+            for p in Path(dest).parent.glob(tmp.stem + "*"):
+                try: p.unlink()
+                except Exception: pass
+    raise RuntimeError(err or "frame")
