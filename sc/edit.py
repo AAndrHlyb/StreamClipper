@@ -323,7 +323,16 @@ def verify_shots(shots, vpool, src, off, job=None):
     return fixed
 
 
-_CASC = {}
+import threading as _th
+_TL = _th.local()
+
+
+def _casc():
+    """Детектори облич — свої для кожного потоку: FaceDetectorYN/CascadeClassifier не потокобезпечні,
+    а шоти рендеряться паралельно (звідси падали «Unknown C++ exception» і «FIXED_TYPE» з OpenCV)."""
+    d = getattr(_TL, "c", None)
+    if d is None: d = _TL.c = {}
+    return d
 _SRCH = {}
 
 
@@ -382,13 +391,18 @@ YUNET = APP_DIR / "models" / "face_detection_yunet_2023mar.onnx"
 def _yunet(img):
     """YuNet (OpenCV Zoo) — набагато точніший за Haar: профіль, окуляри, погане світло."""
     cv2 = _cv2()
-    if "y" not in _CASC:
-        try: _CASC["y"] = cv2.FaceDetectorYN.create(str(YUNET), "", (320, 320), 0.6, 0.3, 50) if YUNET.exists() else None
-        except Exception: _CASC["y"] = None
-    det = _CASC["y"]
+    C = _casc()
+    if "y" not in C:
+        try: C["y"] = cv2.FaceDetectorYN.create(str(YUNET), "", (320, 320), 0.6, 0.3, 50) if YUNET.exists() else None
+        except Exception: C["y"] = None
+    det = C["y"]
     if det is None: return None
-    h, w = img.shape[:2]; det.setInputSize((w, h))
-    _, f = det.detect(img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR))
+    h, w = img.shape[:2]
+    try:
+        det.setInputSize((w, h))
+        _, f = det.detect(np.ascontiguousarray(img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR), np.uint8))
+    except Exception:
+        return None  # → запасний Haar
     return [] if f is None else [tuple(int(v) for v in r[:4]) for r in f]
 
 
@@ -400,9 +414,10 @@ def _faces(img):
 
 def _faces_haar(img):
     cv2 = _cv2()
-    if "f" not in _CASC: _CASC["f"] = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    C = _casc()
+    if "f" not in C: C["f"] = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     g = cv2.equalizeHist(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
-    return list(_CASC["f"].detectMultiScale(g, 1.1, 5, minSize=(int(img.shape[1] * 0.06),) * 2))
+    return list(C["f"].detectMultiScale(g, 1.1, 5, minSize=(int(img.shape[1] * 0.06),) * 2))
 
 
 # ------------------------------------------------------------------ маска людини
@@ -630,8 +645,9 @@ def _faces_small(g, img=None):
     if img is not None:
         y = _yunet(img)
         if y is not None: return y
-    if "f" not in _CASC: _CASC["f"] = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    return list(_CASC["f"].detectMultiScale(cv2.equalizeHist(g), 1.1, 4, minSize=(14, 14)))
+    C = _casc()
+    if "f" not in C: C["f"] = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    return list(C["f"].detectMultiScale(cv2.equalizeHist(g), 1.1, 4, minSize=(14, 14)))
 
 
 # ------------------------------------------------------------------ план кадрів
