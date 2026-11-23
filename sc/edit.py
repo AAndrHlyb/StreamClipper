@@ -3,7 +3,7 @@
 Схема: музика → біти/удари/енергія → план кадрів → кожен кадр окремо через ffmpeg (кроп по обличчю, швидкість, грейд, зерно)
 → покадрова обробка в Python (наїзди, тряска, спалах, RGB-зсув, змаз, маска людини, текст) → ffmpeg-кодер + музика.
 """
-import math, random, subprocess
+import math, random, re, subprocess
 from pathlib import Path
 
 import numpy as np
@@ -272,6 +272,24 @@ def text_events(m, o, L, rnd, words=None):
         if e.get("brand"): e["t1"] = min(L, max(e["t0"] + 1.6, e.get("bend", 0) + 0.8), nxt + 0.5); continue
         e["t1"] = min(nxt, max(e["t0"] + 1.0, last + 0.7) if e.get("words") else e["t0"] + 1.3, L)
         if e["t1"] - e["t0"] < 0.18: e["t1"] = e["t0"] + 0.18
+    # «герої» пісні: ключові слова (найчастіші змістовні — це хук: DRAMA, BULLETS, TRAP…) виходять ВЕЛИКО за людиною
+    # у момент, коли звучать, поверх дрібного рядка фрази — як акцентне слово в авторських едітах
+    sung = [w_ for e in ev if e.get("sung") for w_, _ in e["words"]]
+    if sung:
+        from collections import Counter
+        stop = SMALL_WORDS | {"she", "he", "it", "its", "i'm", "im", "you", "your", "we", "they", "but", "so", "that", "this", "with",
+                              "be", "is", "are", "was", "got", "get", "don't", "dont", "ain't", "aint", "go", "up", "what", "what's", "make",
+                              "like", "just", "all", "do", "no", "yeah", "oh", "can", "could", "by", "at", "from", "into", "out"}
+        norm = lambda x: re.sub(r"[^\w']", "", x.lower())
+        cnt = Counter(norm(x) for x in sung if len(norm(x)) >= 4 and norm(x) not in stop)
+        hooks = {w_ for w_, c in cnt.most_common(6) if c >= 2} or {w_ for w_, _ in cnt.most_common(3)}
+        heroes, last_h = [], -9.0
+        for e in ev:
+            if not e.get("sung"): continue
+            for w_, tw in e["words"]:
+                if norm(w_) in hooks and tw - last_h > 2.2:
+                    heroes.append({"t0": tw, "t1": min(L, tw + 0.95), "txt": w_.upper(), "hero": True}); last_h = tw; break
+        ev = sorted(ev + heroes, key=lambda e: e["t0"])
     return ev
 
 
@@ -285,15 +303,18 @@ def _sample(src, t, pre, job):
 
 
 def _shot_quality(src, t, span):
-    """Якість саме тих секунд, що підуть у ролик: гірший з двох кадрів (початок і ~70 % шоту) + рух між ними."""
+    """Якість саме тих секунд, що підуть у ролик: найгірший з трьох кадрів (початок, середина, кінець шоту)
+    + рух між ними. Кадри 640 px — щоб ловити дрібні субтитри, які з'являються посеред шоту."""
     cv2 = _cv2()
-    a, b = _sample(src, t + 0.1, "", None), _sample(src, t + span * 0.7, "", None)
-    if a is None or b is None: return -9.0
-    qa, qb = frame_quality(a), frame_quality(b)
-    q = min(qa["score"], qb["score"])
-    if qa["hard"] or qb["hard"]: q = min(q, -5.0)  # титри/субтитри/темрява/порожнеча/змаз — ніколи
-    ga = cv2.resize(cv2.cvtColor(a, cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
-    gb = cv2.resize(cv2.cvtColor(b, cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
+    sw, shh = _src_wh(src)
+    w = 640; h = int(round(640 * (shh / sw) / 2)) * 2 if sw and shh else 360
+    fr = [_grab(src, t + d, w, h) for d in (0.1, span * 0.5, max(0.2, span * 0.95))]
+    if any(f is None for f in fr): return -9.0
+    qs = [frame_quality(f) for f in fr]
+    q = min(x["score"] for x in qs)
+    if any(x["hard"] for x in qs): q = min(q, -5.0)  # титри/субтитри/темрява/порожнеча/змаз — ніколи
+    ga = cv2.resize(cv2.cvtColor(fr[0], cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
+    gb = cv2.resize(cv2.cvtColor(fr[2], cv2.COLOR_BGR2GRAY), (64, 64)).astype(np.float32)
     mot = float(np.abs(ga - gb).mean())
     if mot < 2.0: q -= 0.4          # зовсім статичний кадр — нудно
     elif mot > 60: q -= 1.0         # там склейка або хаос — кадр «непонятний»
@@ -567,8 +588,11 @@ def frame_quality(img):
     cl = lambda v: min(1.0, max(0.0, v))
     sc = 0.0
     if in_crop:
-        sc += 2.4 + 1.0 * cl(fw / 0.16)              # людина в кадрі — головне в едіті
+        sc += 2.4 + 0.8 * cl(fw / 0.06)              # людина в кадрі — головне в едіті (і на загальному плані теж)
+        if fw > 0.42: sc -= 0.6                        # дуже великий план — гірше читається
         if fw > 0.7: sc -= 1.2                         # обличчя на весь екран — «непонятний» кадр
+    sb = _subs_score(img) if w0 >= 300 else 0.0
+    if sb >= 3: sc -= 4.0                              # вшиті субтитри джерела
     sc += 0.9 * cl((ent - 4.6) / 2.4) + 0.8 * cl(edges / 0.07) + 0.6 * cl(colorful / 55) + 0.6 * cl((contrast - 22) / 38)
     sc += 0.7 * cl((math.log1p(sharp) - 3.0) / 3.0)
     if ent < 4.3 or edges < 0.012: sc -= 2.5         # порожній кадр
@@ -577,9 +601,9 @@ def frame_quality(img):
     sc -= 1.5 if hot > 0.45 else 0
     sc -= 2.4 * min(tl, 3) + 30 * ta                 # вшиті написи/субтитри джерела в едіті — це сміття
     if sharp < 30: sc -= 1.5
-    hard = dark > 0.45 or hot > 0.5 or tl >= 1 or ent < 4.3 or edges < 0.012 or sharp < 18
+    hard = dark > 0.45 or hot > 0.5 or tl >= 1 or ent < 4.3 or edges < 0.012 or sharp < 18 or sb >= 3
     return {"hard": bool(hard), "score": sc, "face": bool(in_crop), "fs": round(fw * fw * ASPECT, 4) if in_crop else 0.0, "br": round(float(g.mean()) / 255, 3),
-            "sa": round(colorful / 40 - 1, 2), "txt": tl, "dark": dark, "empty": ent < 4.3 or edges < 0.012}
+            "sa": round(colorful / 40 - 1, 2), "txt": tl, "fw": round(fw, 3) if in_crop else 0.0, "dark": dark, "empty": ent < 4.3 or edges < 0.012}
 
 
 def scan_video(src, dur, skip=(), job=None):
@@ -649,7 +673,7 @@ def _scan_grid(src, dur, skip, job, w, h):
 
     def one(t):
         if job is not None: job.check()
-        img = _grab(src, float(t), w, h)
+        img = _grab(src, float(t), w * 2, h * 2)  # 640 px — щоб бачити дрібні субтитри
         done[0] += 1
         if job is not None and done[0] % 25 == 0: job.pct = 60 + 1.5 * done[0] / max(1, len(ts))
         if img is None: return None
@@ -667,6 +691,43 @@ def _scan_grid(src, dur, skip, job, w, h):
     with ThreadPoolExecutor(nw) as ex:
         out = [q for q in ex.map(one, ts) if q]
     return out
+
+
+def _subs_score(img):
+    """Вшиті субтитри: білі/жовті літери з темною обводкою в нижній частині кадру, кілька «літер» на одній лінії."""
+    cv2 = _cv2()
+    h, w = img.shape[:2]
+    if w != 640: img = cv2.resize(img, (640, int(h * 640 / w))); h, w = img.shape[:2]
+    y0 = int(h * 0.55)
+    band = img[y0:]
+    g = cv2.cvtColor(band, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(band, cv2.COLOR_BGR2HSV)
+    white = ((g > 195) & (hsv[..., 1] < 70)).astype(np.uint8)
+    yel = ((hsv[..., 0] > 18) & (hsv[..., 0] < 38) & (hsv[..., 1] > 120) & (hsv[..., 2] > 180)).astype(np.uint8)
+    m = white | yel
+    dark = (g < 70).astype(np.uint8)
+    darkn = cv2.dilate(dark, np.ones((5, 5), np.uint8))
+    n, lab, st, cen = cv2.connectedComponentsWithStats(m)
+    chars = []
+    for i in range(1, n):
+        x, y, ww, hh, a = st[i]
+        if not (5 <= hh <= h * 0.08 and 1 <= ww <= hh * 2.2 and a >= 8): continue
+        ring = darkn[max(0, y - 2):y + hh + 2, max(0, x - 2):x + ww + 2]
+        if ring.mean() < 0.25: continue  # біла пляма без обводки/тіні — не літера
+        chars.append((x, y, ww, hh))
+    if len(chars) < 3: return 0.0
+    # гуртуємо в рядки: схожий центр по Y і висота
+    chars.sort(key=lambda c: c[1] + c[3] / 2)
+    best = 0
+    for c in chars:
+        cy, ch = c[1] + c[3] / 2, c[3]
+        row = [d for d in chars if abs(d[1] + d[3] / 2 - cy) < ch * 0.45 and 0.6 < d[3] / ch < 1.6]
+        if len(row) >= 3:
+            xs = sorted(d[0] for d in row)
+            span = xs[-1] - xs[0]
+            if span < w * 0.7 and np.median(np.diff(xs)) < ch * 2.0:
+                best = max(best, len(row))
+    return float(best)
 
 
 def _text_lines(g):
@@ -743,6 +804,16 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
         di = min(range(n), key=lambda i: abs(cuts[i] - drop))
         picks.insert(min(di, len(picks)), best)
         while len(picks) < n: picks.append(dict(rnd.choice(video_pool)))  # мало кадрів у джерелі — повтори в кінці
+        # ритм планів, як у монтажера: не 3 однакові плани поспіль; ролик відкривається загальним/середнім планом
+        size = lambda p: "close" if p.get("fw", 0) > 0.28 else ("mid" if p.get("fw", 0) > 0.1 else "wide")
+        for k in range(min(4, len(picks))):
+            if size(picks[0]) != "close": break
+            if size(picks[k]) != "close": picks[0], picks[k] = picks[k], picks[0]; break
+        for k in range(2, len(picks)):
+            if size(picks[k]) == size(picks[k - 1]) == size(picks[k - 2]):
+                for j in range(k + 1, len(picks)):
+                    if size(picks[j]) != size(picks[k]) and picks[j] is not best:
+                        picks[k], picks[j] = picks[j], picks[k]; break
     flashes = 0; shots = []; hits_n = 0; used_tr, used_look, used_hit, used_mv = {}, {}, {}, {}
     for i in range(n):
         a, b = cuts[i], cuts[i + 1]; d = b - a
@@ -777,7 +848,7 @@ def plan_shots(m, L, pool, rnd, video_pool=None, style=None):
             if hit: hits_n += 1; flashes += hit == "flash"
         if hit == "flash": fx = "flash" if fx in ("cut", "none") else fx
         move = FX.choose(FX.MOVE_RULES, c, rnd, (), used_mv, prev_sh.get("move") if prev_sh else None, noise=0.5)
-        look = None if (blk or sum(used_look.values()) >= max(2, int(n * 0.35)) or (not is_drop and rnd.random() < 0.45)) else FX.choose(FX.LOOK_RULES, c, rnd, style["looks"], used_look, prev_sh["look"] if prev_sh else None,
+        look = None if (blk or sum(used_look.values()) >= max(3, int(n * 0.55)) or (not is_drop and rnd.random() < 0.25)) else FX.choose(FX.LOOK_RULES, c, rnd, style["looks"], used_look, prev_sh["look"] if prev_sh else None,
                                          person_only=FX.PERSON_LOOKS)
         cut_in = (not blk and d >= 0.55 and i > 0 and fx in ("cut", "none", "zoom", "whip") and look not in ("sticker", "popframe", "thermal")
                   and c["face"] and rnd.random() < style.get("cutout", 0.3))
@@ -1102,6 +1173,9 @@ def style_events(ev, rnd, behind_ok, prefer=None):
         if e.get("words"):
             s = "line" if (len(e["words"]) >= 3 or len(e["txt"]) > 12 or rnd.random() < 0.5) else "build"
         if e.get("brand"): s = "brand"
+        if e.get("hero"):  # ключове слово — великим «авторським» стилем, по черзі
+            s = ("behind", "rise", "deep", "slam", "wide")[k % 5] if behind_ok else ("slam", "deep", "rgb", "wide")[k % 4]
+            if s == "wide" and len(e["txt"]) > 8: s = "behind"
         e["style"] = s
         e["color"] = acc_col
         e["fill"] = (246, 246, 246) if (s == main or rnd.random() < 0.5) else acc_col
@@ -1176,12 +1250,12 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
         cache = d / "vscan.json"
         try: vpool = _json.loads(cache.read_text()) if cache.exists() else None
         except Exception: vpool = None
-        if isinstance(vpool, dict) and vpool.get("v") == 6 and vpool.get("ar", "9:16") == ar_: vpool = vpool["items"]
+        if isinstance(vpool, dict) and vpool.get("v") == 7 and vpool.get("ar", "9:16") == ar_: vpool = vpool["items"]
         else:
             job.step("edit_scan", 60)
             vpool = scan_video(meta["video"], meta.get("duration") or 0, skip=(meta.get("info") or {}).get("skip") or [], job=job)
             job.log("edit_scanned", len(vpool))
-            cache.write_text(_json.dumps({"v": 6, "ar": ar_, "items": vpool}))
+            cache.write_text(_json.dumps({"v": 7, "ar": ar_, "items": vpool}))
         for v in vpool:  # моменти, де щось відбувається за звуком/чатом, — трохи вище
             if any(abs(v["t"] - c["peak"]) < 4 for c in pool if c.get("final", 0) > 0.5): v["score"] += 0.6
         if len(vpool) < 8: vpool = None

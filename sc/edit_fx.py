@@ -479,7 +479,7 @@ STYLES = {
 # st (сила долі), d (тривалість), face (є обличчя), fs (розмір обличчя), fbr (яскравість кадру 0..1), fsa (насиченість, z)
 _ON = lambda c, *secs: 1.0 if c["sec"] in secs else 0.0
 LOOK_RULES = {
-    None:        lambda c: 1.25 + 0.6 * _ON(c, "intro", "resolve") + (0.5 if c["d"] < 0.35 else 0) - 0.5 * _ON(c, "drop"),  # чиста картинка — норма, образ — акцент
+    None:        lambda c: 0.35 + 0.5 * _ON(c, "intro", "resolve") + (0.5 if c["d"] < 0.35 else 0) - 0.5 * _ON(c, "drop"),  # чиста картинка — норма, образ — акцент
     "spotlight": lambda c: 0.8 * c["face"] + 0.5 * _ON(c, "build", "pre") + 0.3 * (1 - c["fbr"]),
     "colorpop":  lambda c: 0.7 * c["face"] + 0.4 * max(0.0, c["fsa"]) + 0.3 * _ON(c, "peak"),
     "bwred":     lambda c: 0.6 * c["face"] + 0.5 * (1 - c["br"]) + 0.3 * _ON(c, "pre", "drop"),
