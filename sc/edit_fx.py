@@ -543,3 +543,90 @@ def choose(rules, c, rnd, prefer=(), used=None, prev=None, bonus=0.55, noise=0.4
     if best is not None: used[best] = used.get(best, 0) + 1
     return best
 
+
+# ------------------------------------------------------------------ віртуальна камера (як у моушн-дизайні та іграх)
+class CamRig:
+    """Жива камера для всього едіту:
+    • «травма» (trauma) як у GDC-доповіді про camera shake: удари додають травму, вона згасає; тряска = травма² × гладкий шум
+      (не випадкові стрибки кадр-у-кадр, а плавне «дихання», що різко посилюється на ударі);
+    • пружина зуму з недодемпфуванням: на кожну долю кадр «підстрибує» з перельотом і повертається (overshoot);
+    • ручна камера: ледь помітний дрейф і нахил весь час — кадр ніколи не «мертвий»;
+    • слідкування за людиною: при наближенні кадр зсувається так, щоб людина лишалась у композиції."""
+
+    def __init__(self, rnd, energy=1.0):
+        self.ph = [rnd.uniform(0, 100) for _ in range(12)]
+        self.tr = 0.0; self.zx = 0.0; self.zv = 0.0; self.fx = 0.0; self.fy = 0.0
+        self.energy = energy; self.prev = None
+
+    def _n(self, t, ch):  # гладкий шум −1..1 (3 октави синусів з випадковими фазами)
+        p = self.ph[ch * 3:ch * 3 + 3]
+        return (math.sin(t * 1.0 + p[0]) * 0.5 + math.sin(t * 2.3 + p[1]) * 0.3 + math.sin(t * 4.7 + p[2]) * 0.2)
+
+    def step(self, t, dt, beat=0.0, hit=0.0, head=None, z=1.0):
+        e = self.energy
+        self.tr = max(0.0, self.tr - 1.9 * dt)
+        if hit: self.tr = min(1.0, self.tr + 0.6 * hit)
+        if beat: self.tr = min(1.0, self.tr + 0.1 * beat)
+        # пружина зуму: k=300, c=15 → ζ≈0.43 (перелітає і повертається за ~0.25 с)
+        if beat: self.zv += (1.0 + 0.8 * beat) * e
+        if hit: self.zv += 5.0 * hit * e
+        a = -300 * self.zx - 15 * self.zv
+        self.zv += a * dt; self.zx += self.zv * dt
+        sh = self.tr ** 2 * e
+        dx = sh * 38 * self._n(t * 13, 0) + 5 * self._n(t * 0.7, 1)
+        dy = sh * 30 * self._n(t * 13, 2) + 4 * self._n(t * 0.6, 3)
+        rot = sh * 3.2 * self._n(t * 9, 1) + 0.35 * self._n(t * 0.5, 2)
+        zz = 1 + 0.75 * self.zx  # ~3 % на долю, ~10 % на удар, з перельотом
+        # слідкування: зсув до людини, але не більше, ніж дозволяє запас від наближення
+        if head is not None:
+            room = max(0.0, (z * zz - 1)) * W / 2
+            tx = max(-room, min(room, (W / 2 - head["x"]) * 0.5))
+            ty = max(-room * H / W, min(room * H / W, (H * 0.42 - head["cy"]) * 0.3))
+            self.fx += (tx - self.fx) * 0.12; self.fy += (ty - self.fy) * 0.12
+        else:
+            self.fx *= 0.9; self.fy *= 0.9
+        return zz, dx + self.fx, dy + self.fy, rot
+
+
+def motion_blur(fr, vx, vy):
+    """Змаз руху вздовж швидкості камери (як motion blur у After Effects): кілька зсунутих копій уздовж вектора."""
+    cv2 = _cv2()
+    sp = math.hypot(vx, vy)
+    if sp < 7: return fr
+    n = 4 if sp < 25 else 6
+    acc = fr.astype(np.float32)
+    for k in range(1, n):
+        f = k / n * 0.8
+        M = np.float32([[1, 0, -vx * f], [0, 1, -vy * f]])
+        acc += cv2.warpAffine(fr, M, (W, H), borderMode=cv2.BORDER_REFLECT)
+    return (acc / n).astype(np.uint8)
+
+
+def look_parallax(fr, m, head, lt, d, st, acc):
+    """3D-паралакс (2.5D): людину вирізаємо, фон «латаємо» і їдемо камерою — людина наближається швидше за фон,
+    фон трохи зсувається вбік. Як «3D zoom» у CapCut: передній план і фон рухаються з різною швидкістю."""
+    cv2 = _cv2()
+    if m is None: return fr
+    if "bg" not in st:  # фон без людини (inpaint на ¼ роздільності — швидко), рахуємо раз на шот
+        small = cv2.resize(fr, (W // 4, H // 4), interpolation=cv2.INTER_AREA)
+        mk = (cv2.resize(m, (W // 4, H // 4)) > 0.3).astype(np.uint8) * 255
+        mk = cv2.dilate(mk, np.ones((9, 9), np.uint8))
+        bg = cv2.inpaint(small, mk, 5, cv2.INPAINT_TELEA)
+        st["bg"] = cv2.resize(cv2.GaussianBlur(bg, (0, 0), 2), (W, H), interpolation=cv2.INTER_CUBIC)
+        st["dir"] = 1 if (head is None or head["x"] < W / 2) else -1
+    p = ease_io(min(1.0, lt / max(0.3, d)))
+    zb, zf = 1.0 + 0.04 * p, 1.0 + 0.13 * p
+    cx = head["x"] if head else W / 2; cy = head["bottom"] if head else H * 0.8
+    Mb = cv2.getRotationMatrix2D((W / 2, H / 2), 0, zb); Mb[0, 2] += st["dir"] * 40 * p
+    bg = cv2.warpAffine(st["bg"], Mb, (W, H), borderMode=cv2.BORDER_REFLECT)
+    Mf = cv2.getRotationMatrix2D((cx, min(H - 1, cy)), 0, zf); Mf[0, 2] -= st["dir"] * 25 * p
+    M = full_mask(m)[..., 0]
+    fg = cv2.warpAffine(fr, Mf, (W, H), borderMode=cv2.BORDER_REFLECT)
+    mf = cv2.warpAffine(M, Mf, (W, H))[..., None]
+    return (bg * (1 - mf) + fg * mf).astype(np.uint8)
+
+
+LOOKS["parallax"] = look_parallax
+PERSON_LOOKS.add("parallax")
+LOOK_RULES["parallax"] = lambda c: (1.1 if c["face"] else -2) * (0.8 if c["sec"] in ("intro", "build", "resolve") else 0.35) + 0.3 * (c["d"] >= 0.8)
+

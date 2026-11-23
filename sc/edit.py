@@ -1074,11 +1074,11 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
         cache = d / "vscan.json"
         try: vpool = _json.loads(cache.read_text()) if cache.exists() else None
         except Exception: vpool = None
-        if isinstance(vpool, dict) and vpool.get("v") == 5: vpool = vpool["items"]
+        if isinstance(vpool, dict) and vpool.get("v") == 5 and vpool.get("ar", "9:16") == ar_: vpool = vpool["items"]
         else:
             job.step("edit_scan", 60)
             vpool = scan_video(meta["video"], meta.get("duration") or 0, skip=(meta.get("info") or {}).get("skip") or [], job=job)
-            cache.write_text(_json.dumps({"v": 5, "items": vpool}))
+            cache.write_text(_json.dumps({"v": 5, "ar": ar_, "items": vpool}))
         for v in vpool:  # моменти, де щось відбувається за звуком/чатом, — трохи вище
             if any(abs(v["t"] - c["peak"]) < 4 for c in pool if c.get("final", 0) > 0.5): v["score"] += 0.6
         if len(vpool) < 8: vpool = None
@@ -1189,6 +1189,8 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 job.log("fx_err", tag, f"{Path(tb.filename).name}:{tb.lineno} {(str(e).strip().splitlines() or [type(e).__name__])[-1][:90]}")
                 traceback.print_exc()
             return fallback
+    rig = FX.CamRig(rnd, energy=1.15 if sname in ("hype", "neon") else (0.75 if sname == "cinema" else 1.0))
+    bptr = hptr = 0; last_head = None; cam_prev = None
     try:
         for i, (sh, pr) in enumerate(zip(shots, parts)):
             job.check()
@@ -1206,17 +1208,16 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                     cur = np.frombuffer(buf, np.uint8).reshape(H, W, 3); cur_idx += 1
                 fr = cur.copy() if cur is not None else (prev.copy() if prev is not None else np.zeros((H, W, 3), np.uint8))
                 t = fi / FPS
-                # ---- рух камери: пульс на кожну долю, удар, нахил, тряска, легке погойдування
-                lb = max([b for b in beats if b <= t + 1e-3], default=-9)
-                lh = max([h for h in hits if h <= t + 1e-3], default=-9)
-                bp = math.exp(-(t - lb) / 0.09) if t - lb < 0.4 else 0.0
-                hp = math.exp(-(t - lh) / 0.12) if t - lh < 0.6 else 0.0
-                z = 1 + 0.05 * bp + 0.15 * hp + (0.02 * j / max(1, pr["n"]) if not sh.get("resolve") else 0.06 * j / max(1, pr["n"]))
-                kick = rc.setdefault(("k", lh), rnd.choice([-1, 1]))
-                ang = 2.2 * kick * hp
-                dx = dy = 0.0
-                if lh in strong and t - lh < 0.2:
-                    amp = 26 * math.exp(-(t - lh) / 0.07); dx, dy = rnd.uniform(-amp, amp), rnd.uniform(-amp, amp)
+                # ---- жива камера: пружина зуму на кожну долю (з перельотом), «травма»-тряска на ударах, ручний дрейф,
+                # слідкування за людиною (FX.CamRig)
+                bt = ht = 0.0
+                while bptr < len(beats) and beats[bptr] <= t + 1e-3:
+                    bt = max(bt, (m["strength"][bptr] if bptr < len(m["strength"]) else 0.5)); bptr += 1
+                while hptr < len(hits) and hits[hptr] <= t + 1e-3:
+                    ht = 1.0 if hits[hptr] in strong else 0.6; hptr += 1
+                zr, dx, dy, ang = rig.step(t, 1 / FPS, bt, ht, last_head, 1.0 + (0.08 if sh.get("move") in ("push", "pull", "pan") else 0.04))
+                z = zr + (0.02 * j / max(1, pr["n"]) if not sh.get("resolve") else 0.06 * j / max(1, pr["n"]))
+                bp = min(1.0, max(0.0, rig.zx * 30))  # пульс долі для тексту
                 # ---- переходи з узгодженою швидкістю: рух не зупиняється на склейці
                 # ---- рух камери всередині шоту (обирає «режисер») + хук на першому кадрі ролика
                 prog = j / max(1, pr["n"] - 1); lt0 = j / FPS; mv = sh.get("move")
@@ -1240,6 +1241,12 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                     q = 1 - j / 4; dx += W * 0.22 * q ** 2.2; hblur = max(hblur, int(30 + 70 * q))
                 if fx == "flash" and j < 4: z *= 1 + 0.12 * (1 - j / 4)
                 fr = safe("zoom", lambda: zoom_frame(fr, z, ang, dx, dy), fr)
+                if cam_prev is not None and j > 0 and not hblur:  # змаз руху від швидкості камери
+                    vx, vy = dx - cam_prev[0], dy - cam_prev[1]
+                    vz = (z - cam_prev[2]) * W * 0.5
+                    if math.hypot(vx, vy) > 7: fr = safe("mblur", lambda: FX.motion_blur(fr, vx, vy), fr)
+                    elif vz > 9: fr = safe("zblur", lambda: zoom_blur(fr, min(0.06, vz / 900)), fr)
+                cam_prev = (dx, dy, z)
                 if blur > 0.01: fr = safe("blur", lambda: zoom_blur(fr, blur), fr)
                 if prev is not None and fx in ("zoom", "whip", "spin") and j < 3:  # м'яке перетікання: старий кадр «пролітає» крізь новий
                     a_ = (0.55, 0.3, 0.12)[j]
@@ -1269,6 +1276,7 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                 # ---- людина і текст
                 mask = safe("seg", lambda: seg(fr), None) if seg else None
                 head = safe("head", lambda: head_of(mask), None) if mask is not None else None
+                last_head = head
                 lt = j / FPS; dshot = pr["n"] / FPS
                 if sh.get("look"):
                     fr = safe("look_" + sh["look"], lambda: FX.LOOKS[sh["look"]](fr, mask if head else None, head, lt, dshot, sst, ev_acc), fr)
