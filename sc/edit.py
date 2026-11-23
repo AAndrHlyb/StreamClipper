@@ -30,6 +30,7 @@ FONT_BOLD = APP_DIR / "fonts" / "Montserrat-ExtraBold.ttf"
 FONT_CYR = APP_DIR / "fonts" / "Oswald-Bold.ttf"
 FONT_WIDE = APP_DIR / "fonts" / "Unbounded-ExtraBold.ttf"   # широкий гротеск як у референсах (є кирилиця)
 FONT_WIDE_M = APP_DIR / "fonts" / "Unbounded-Medium.ttf"
+FONT_SERIF = APP_DIR / "fonts" / "PlayfairDisplay-ExtraBold.ttf"  # антиква для брендів (OFL)
 SMALL_WORDS = {"a", "an", "and", "the", "of", "in", "on", "to", "for", "is", "x", "&", "і", "й", "в", "у", "на", "та", "і", "и", "с", "з", "не", "я", "а"}  # службові слова у стилі build — тонкі й малі
 
 
@@ -163,7 +164,8 @@ def lyrics(path, start, dur, o, job):
         segs, _ = mdl.transcribe(audio, language=lang, word_timestamps=True, beam_size=5, best_of=5, temperature=[0.0, 0.2, 0.4],
                                  vad_filter=vad, vad_parameters={"threshold": 0.25, "min_silence_duration_ms": 300},
                                  condition_on_previous_text=ctx, no_speech_threshold=0.6, compression_ratio_threshold=2.6,
-                                 hallucination_silence_threshold=2.0 if vad else None)
+                                 hallucination_silence_threshold=2.0 if vad else None,
+                                 hotwords="Dolce Gabbana, Gucci, Louis Vuitton, Prada, Balenciaga, Versace, Chanel, Dior, Rolex, Lamborghini")
         ws = []
         for sg in segs:
             for w in (sg.words or []):
@@ -214,10 +216,18 @@ def text_events(m, o, L, rnd, words=None):
     if words:
         # фрази, як співаються: слова підряд (пауза < 0.4 с) до ~5 слів / 22 символів → одна подія,
         # кожне слово з'являється у свій момент (стиль line/build), а не «слово-на-весь-екран» щодолі
+        from . import brands as BR
+        spans = {a: (b_, big, small) for a, b_, big, small in BR.find(words)}
         i = 0
         while i < len(words):
+            if i in spans:  # бренд у пісні — окремий момент: великий напис + повна назва (як «D&G» у референсі)
+                b_, big, small = spans[i]
+                ev.append({"t0": snap(words[i]["s"]), "t1": 0, "txt": big, "brand": (big, small),
+                           "bend": words[b_ - 1]["e"]})
+                i = b_; continue
             grp = [words[i]]
             while (i + len(grp) < len(words) and len(grp) < 5 and words[i + len(grp)]["s"] - grp[-1]["e"] < 0.4
+                   and (i + len(grp)) not in spans
                    and sum(len(g["w"]) + 1 for g in grp) + len(words[i + len(grp)]["w"]) <= 22):
                 grp.append(words[i + len(grp)])
             t0 = snap(grp[0]["s"])
@@ -236,9 +246,9 @@ def text_events(m, o, L, rnd, words=None):
     out, k = [], 0
     while k < len(ev):
         grp = [ev[k]]
-        if not ev[k].get("words") and rnd.random() < 0.38:
+        if not ev[k].get("words") and not ev[k].get("brand") and rnd.random() < 0.38:
             while (k + len(grp) < len(ev) and len(grp) < 3 and ev[k + len(grp)]["t0"] - grp[-1]["t0"] < 0.7
-                   and not ev[k + len(grp)].get("words") and sum(len(g["txt"]) for g in grp) + len(ev[k + len(grp)]["txt"]) <= 15):
+                   and not ev[k + len(grp)].get("words") and not ev[k + len(grp)].get("brand") and sum(len(g["txt"]) for g in grp) + len(ev[k + len(grp)]["txt"]) <= 15):
                 grp.append(ev[k + len(grp)])
         if len(grp) > 1:
             ws = [(w, g["t0"]) for g in grp for w in g["txt"].split()]
@@ -249,6 +259,7 @@ def text_events(m, o, L, rnd, words=None):
     for k, e in enumerate(ev):
         nxt = ev[k + 1]["t0"] if k + 1 < len(ev) else L
         last = e["words"][-1][1] if e.get("words") else e["t0"]
+        if e.get("brand"): e["t1"] = min(L, max(e["t0"] + 1.6, e.get("bend", 0) + 0.8), nxt + 0.5); continue
         e["t1"] = min(nxt, max(e["t0"] + 1.0, last + 0.7) if e.get("words") else e["t0"] + 1.3, L)
         if e["t1"] - e["t0"] < 0.18: e["t1"] = e["t0"] + 0.18
     return ev
@@ -821,7 +832,7 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
     hx = head["x"] if person else W / 2
     cy, pb = H * 0.42, 0.0
     if person:
-        cy, pb = text_spot(mask, head, rc, id(ev), H * {"behind": 0.2, "build": 0.26, "wide": 0.22, "line": 0.12}.get(st, 0.15))
+        cy, pb = text_spot(mask, head, rc, id(ev), H * {"behind": 0.2, "build": 0.26, "wide": 0.22, "line": 0.12, "brand": 0.32}.get(st, 0.15))
         if st in ("line", "build"): pb = 0.0  # фразу з кількох слів не ховаємо — інакше зникає слово посередині
     pulse = 1 + 0.06 * beat_pulse
     if st == "behind":
@@ -919,6 +930,25 @@ def draw_text(frame, ev, t, mask, head, rc, beat_pulse):
                 blend(frame, warp(spr, (0.6 + 0.4 * back_ease(min(1.0, q))) * (pulse if n_ == len(rows) - 1 else 1)), W / 2, y + h_ / 2,
                       mask, pb, fade * min(1.0, q * 2))
             y += h_
+    elif st == "brand":  # бренд: великий напис антиквою, «влітає» з перельотом і світінням, під ним повна назва розрядкою
+        big, small = ev["brand"]
+        if dt < 0.12:  # спалах на момент, коли бренд прозвучав
+            frame[:] = (frame.astype(np.float32) * (1 - 0.55 * (1 - dt / 0.12)) + 255 * 0.55 * (1 - dt / 0.12)).astype(np.uint8)
+        bf = FONT_WIDE if any(c in big for c in "&-") or len(big) <= 4 else FONT_SERIF  # монограми — гротеском, назви — антиквою
+        sz = fit_size(big, bf, W * (0.66 if len(big) <= 4 else 0.86), hi=(520 if len(big) <= 4 else 300))
+        spr = sprite(big, sz, bf, white)
+        if len(big) > 4: pb = min(pb, 0.0)  # довга назва за людиною втрачає середину — ставимо поверх
+        e_ = back_ease(min(1.0, dt / 0.28)); sc_ = (1.35 - 0.35 * e_) * (1 + 0.04 * beat_pulse)
+        by = cy if person else H * 0.44
+        if dt < 0.2:  # слід-відлуння при влітанні
+            blend(frame, warp(spr, sc_ * 1.12), W / 2, by, mask, pb, 0.25 * fade)
+        blend(frame, warp(glow(spr, acc, 18), sc_), W / 2, by, mask, pb, 0.35 * fade)
+        blend(frame, warp(spr, sc_), W / 2, by, mask, pb, fade)
+        if small and dt > 0.12:
+            q = min(1.0, (dt - 0.12) / 0.2)
+            ssz = fit_size(" ".join(small), FONT_WIDE_M, W * 0.62, hi=64)
+            ss = sprite(" ".join(small), ssz, FONT_WIDE_M, white)
+            blend(frame, ss, W / 2, by + spr.shape[0] * 0.5 * sc_ + ss.shape[0] * 0.6 + 26 * (1 - q), None, False, fade * q)
     elif st == "line":  # фраза будується зліва направо, слово за словом (як «SHE AIN'T INTO NO DRAMA» у референсі)
         words = ev.get("words") or [(w, ev["t0"]) for w in txt.split()]
         f = FONT_WIDE
@@ -1000,6 +1030,7 @@ def style_events(ev, rnd, behind_ok, prefer=None):
         if s == "wide" and len(e["txt"]) > 8: s = "behind"
         if e.get("words"):
             s = "line" if (len(e["words"]) >= 3 or len(e["txt"]) > 12 or rnd.random() < 0.5) else "build"
+        if e.get("brand"): s = "brand"
         e["style"] = s
         e["color"] = acc_col
         e["fill"] = (246, 246, 246) if (s == main or rnd.random() < 0.5) else acc_col
@@ -1155,9 +1186,15 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
     job.step("edit_fx", 78)
     seg = Segmenter() if o.get("edit_behind", True) else None
     behind_ok = seg is not None and seg.net is not None
+    from . import brands as BR
+    for e in ev:  # бренд, введений вручну («свій текст»), теж стає брендовим моментом
+        if not e.get("brand") and not e.get("words"):
+            b_ = BR.match(e["txt"])
+            if b_: e["brand"] = (b_[0], b_[1]); e["txt"] = b_[0]
     ev = style_events(ev, rnd, behind_ok, style.get("text"))
+    brand_ts = sorted(e["t0"] for e in ev if e.get("brand")); brptr = 0
     for e in ev:  # під час паузи перед дропом — неоновий напис у темряві
-        if any(sh.get("blackout") and sh["a"] - 0.05 <= e["t0"] < sh["b"] for sh in shots):
+        if not e.get("brand") and any(sh.get("blackout") and sh["a"] - 0.05 <= e["t0"] < sh["b"] for sh in shots):
             e["style"] = "neon"; e.pop("words", None); e["txt"] = " ".join(e["txt"].split()[:2])
     out = d / "out" / name
     eargs = ["-c:v", "libx264", "-preset", "medium", "-crf", "15", "-tune", "film", "-profile:v", "high", "-level", "4.2",
@@ -1215,6 +1252,8 @@ def make_edit(d, meta, pool, o, job, seed=0, name="edit_9x16.mp4"):
                     bt = max(bt, (m["strength"][bptr] if bptr < len(m["strength"]) else 0.5)); bptr += 1
                 while hptr < len(hits) and hits[hptr] <= t + 1e-3:
                     ht = 1.0 if hits[hptr] in strong else 0.6; hptr += 1
+                while brptr < len(brand_ts) and brand_ts[brptr] <= t + 1e-3:
+                    ht = 1.0; brptr += 1  # бренд прозвучав — удар камерою
                 zr, dx, dy, ang = rig.step(t, 1 / FPS, bt, ht, last_head, 1.0 + (0.08 if sh.get("move") in ("push", "pull", "pan") else 0.04))
                 z = zr + (0.02 * j / max(1, pr["n"]) if not sh.get("resolve") else 0.06 * j / max(1, pr["n"]))
                 bp = min(1.0, max(0.0, rig.zx * 30))  # пульс долі для тексту
