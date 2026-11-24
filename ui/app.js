@@ -1,5 +1,5 @@
 // StreamClipper UI. Стан: P (перевірене посилання), CH (канал), cur (поточна задача).
-const UIV='2.19.0';const $=id=>document.getElementById(id);
+const UIV='2.19.1';const $=id=>document.getElementById(id);
 let THFAIL=false,LANG='uk',SET={},P=null,CH=null,cur={},img=null,cam=[0,0,.25,.25],poll=null,WEDIT=false,WLIST=[],NOTIFIED={};
 const st={etm:'lyrics',egrade:'auto',estyle:'auto',ear:'4:3',emode:'normal',sspeed:'auto',mode:'best',layout:'blur',per:'30',typ:'archive',sp:'classic',ss:'m',spos:'auto',sw:'3',slang:'uk'};
 const t=(k,...a)=>{let s=(I18N[LANG]||I18N.uk)[k];if(s===undefined)s=I18N.uk[k]??k;return s.replace(/\{(\d)\}/g,(_,i)=>a[i]??'')};
@@ -179,9 +179,9 @@ async function start(){if(st.mode==='edit'&&!EM){alert(t('need_music'));return}$
 function logLine(l){return `${l.t}  ${t(l.k==='parts'?'parts_log':l.k,...l.a)}`}
 function track(id){clearInterval(poll);cur.job=id;poll=setInterval(async()=>{try{const j=await api('/api/job/'+id);cur.dir=j.dir;
   $('stg').textContent=t(j.stage,...j.args);$('sub').textContent=j.sub||'';$('pbar').style.width=j.pct+'%';$('elp').textContent=hms(j.elapsed);
-  $('log').textContent=j.logs.map(logLine).join('\n');$('log').scrollTop=1e9;$('stopbtn').classList.toggle('hide',!(j.live&&j.state==='running'));
+  {const lt=j.logs.map(logLine).join('\n');if($('log').textContent!==lt){$('log').textContent=lt;$('log').scrollTop=1e9}}$('stopbtn').classList.toggle('hide',!(j.live&&j.state==='running'));
   if(j.state==='review'&&j.candidates&&!$('srv').dataset.job){showReview(j)}
-  if(j.results.length){$('s4').classList.remove('hide');renderRes(j.results,j.dir,j.src_dur||cur.src)}
+  if(j.results.length){$('s4').classList.remove('hide');const rk=j.id+':'+j.results.length+':'+j.state;if(cur.rk!==rk){cur.rk=rk;renderRes(j.results,j.dir,j.src_dur||cur.src)}}
   if(j.extra&&j.extra.compilation){showComp(j.extra.compilation,j.extra.compilation_dur)}
   if(j.extra&&j.extra.teaser){showComp(j.extra.teaser,j.extra.teaser_dur,true)}
   if(j.extra&&j.extra.edit){showComp(j.extra.edit,j.extra.edit_dur,true,'edit');if(j.extra.edit_info&&j.state==='done')showEditPanel(j.extra.edit_info,j.extra.edit_project,j.opts)}
@@ -349,7 +349,8 @@ function follow(id){tab('cut');$('s3').classList.remove('hide');['s4','srv','aft
 async function syncPoll(){let r;try{r=await api('/api/active')}catch(e){return}
   const run=r.jobs.filter(j=>['running','review'].includes(j.state));
   $('act').classList.toggle('hide',!run.length);
-  $('act').innerHTML=run.map(j=>`<button class="ap" onclick="follow('${j.id}')"><i class="spin"></i><b>${esc((j.title||modeName(j.mode)).slice(0,28))}</b><span>${Math.round(j.pct)}%</span>${j.device&&j.device!==DEV?`<em>${esc(devName(j.device))}</em>`:''}</button>`).join('');
+  const ah=run.map(j=>`<button class="ap" onclick="follow('${j.id}')"><i class="spin"></i><b>${esc((j.title||modeName(j.mode)).slice(0,28))}</b><span>${Math.round(j.pct)}%</span>${j.device&&j.device!==DEV?`<em>${esc(devName(j.device))}</em>`:''}</button>`).join('');
+  if(ah!==SY.ah){SY.ah=ah;$('act').innerHTML=ah}  // без перемальовування, якщо нічого не змінилось (на iPhone не «тремтить»)
   for(const j of r.jobs){const was=SY.seen[j.id];SY.seen[j.id]=j.state;if(!SY.init)continue;const mine=j.id===cur.job,nm=esc(j.title||modeName(j.mode));
     if(!was&&['running','review'].includes(j.state)&&!mine&&j.device!==DEV)toast(t('sy_started',devName(j.device),modeName(j.mode),nm),[[t('sy_follow'),()=>follow(j.id)]]);
     if(j.state==='done'&&((was&&['running','review'].includes(was))||(!was&&j.ended&&r.now-j.ended<30&&j.device!==DEV))){notifyB('StreamClipper',t('sy_done',nm));if(!mine||document.hidden)toast(t('sy_done',nm),[[t('sy_open'),()=>follow(j.id)]],14000)}
