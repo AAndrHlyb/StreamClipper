@@ -1,5 +1,5 @@
 // StreamClipper UI. Стан: P (перевірене посилання), CH (канал), cur (поточна задача).
-const UIV='2.19.1';const $=id=>document.getElementById(id);
+const UIV='2.19.2';const $=id=>document.getElementById(id);
 let THFAIL=false,LANG='uk',SET={},P=null,CH=null,cur={},img=null,cam=[0,0,.25,.25],poll=null,WEDIT=false,WLIST=[],NOTIFIED={};
 const st={etm:'lyrics',egrade:'auto',estyle:'auto',ear:'4:3',emode:'normal',sspeed:'auto',mode:'best',layout:'blur',per:'30',typ:'archive',sp:'classic',ss:'m',spos:'auto',sw:'3',slang:'uk'};
 const t=(k,...a)=>{let s=(I18N[LANG]||I18N.uk)[k];if(s===undefined)s=I18N.uk[k]??k;return s.replace(/\{(\d)\}/g,(_,i)=>a[i]??'')};
@@ -22,7 +22,8 @@ function applyI18n(){document.documentElement.lang=LANG;document.querySelectorAl
 function seg(id,key,cb){$(id).querySelectorAll('button').forEach(b=>{b.onclick=e=>{e.preventDefault();st[key]=b.dataset.v;mark(id,key);cb&&cb()}})}
 function mark(id,key){$(id).querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.v===String(st[key])))}
 function tab(n){document.querySelectorAll('.page').forEach(p=>p.classList.toggle('hide',p.id!=='p-'+n));document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.tab===n));
-  if(n==='channels')loadWatch();if(n==='queue')loadQueue();if(n==='lib')loadLib();if(n==='set')loadSet();location.hash=n}
+  if(n==='channels')loadWatch();if(n==='queue')loadQueue();if(n==='lib')loadLib();if(n==='set')loadSet();
+  try{history.replaceState(null,'','#'+n)}catch(e){}window.scrollTo({top:0,behavior:'instant'})}  // replaceState: зміна hash більше не стрибає до елемента з таким id (#lib) і не смикає сторінку на iPhone
 document.querySelectorAll('#tabs button').forEach(b=>b.onclick=()=>tab(b.dataset.tab));
 let CNT={best:40,seq:0,compile:8,teaser:30,edit:15},PREVM='best',EM=null;
 function modeUI(){if(!EM&&$('emname'))$('emname').textContent=t('need_music');$('cntl').textContent=t({seq:'parts',compile:'comp_len',best:'max_clips',teaser:'teaser_len',edit:'edit_len'}[st.mode]);$('s2').classList.toggle('cmode',st.mode==='compile');$('s2').classList.toggle('tmode',st.mode==='teaser'||st.mode==='edit');$('s2').classList.toggle('emode',st.mode==='edit');

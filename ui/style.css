@@ -317,3 +317,34 @@ html,body{overscroll-behavior:none;-webkit-text-size-adjust:100%}
 header{padding-top:env(safe-area-inset-top);height:auto;min-height:56px;box-sizing:content-box}
 @media (max-width:700px){header{min-height:52px}}
 .spin{will-change:transform}
+
+/* сторінки однакової мінімальної висоти — при перемиканні вкладок висота документа не «стрибає» */
+main{min-height:calc(100dvh - 56px)}
+html{scrollbar-gutter:stable}
+/* телефон горизонтально: навігація — вузька панель зліва, шапка не липка, відступи від «чубчика» */
+@media (orientation:landscape) and (max-height:520px){
+  header{position:static;min-height:44px;height:44px;padding:0 calc(16px + env(safe-area-inset-right)) 0 16px}
+  body{padding-bottom:0;padding-left:calc(72px + env(safe-area-inset-left));padding-right:env(safe-area-inset-right)}
+  nav{position:fixed;left:0;top:0;bottom:0;right:auto;width:calc(72px + env(safe-area-inset-left));margin:0;z-index:6;
+      display:flex;flex-direction:column;justify-content:center;gap:2px;padding:0 0 0 env(safe-area-inset-left);
+      background:var(--deep);border-right:1px solid var(--line);border-top:0;transform:translateZ(0)}
+  nav button{height:54px;width:100%;flex-direction:column;justify-content:center;gap:3px;padding:0 2px;font-size:10px;line-height:12px;border-radius:0;color:var(--t3);box-shadow:none}
+  nav button svg{display:block;width:20px;height:20px}
+  nav button span{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  nav button.on{background:transparent;box-shadow:inset 2px 0 0 var(--acc);color:var(--t1)}
+  nav button.on svg{color:var(--acc)}
+  main{padding:16px;min-height:calc(100dvh - 44px)}
+  h1{font-size:20px;line-height:26px}.lead{display:none}
+  section{padding:16px;margin-bottom:12px}
+  .go-row{position:sticky;bottom:0;z-index:4;background:var(--card);margin:0;padding:10px 0;border-top:1px solid var(--line)}
+  .go-row .hint{display:none}
+  .act{top:6px;bottom:auto;left:auto;right:calc(12px + env(safe-area-inset-right));align-items:flex-end}
+  .toasts{top:auto;bottom:12px;left:auto;right:calc(12px + env(safe-area-inset-right));max-width:360px}
+  .phone{width:200px;padding:8px;border-radius:24px}.phone canvas{width:184px;height:327px}
+  .lay{grid-template-columns:minmax(0,1fr) auto}
+  .cmode .phone{max-width:min(520px,calc(60dvh * 16 / 9))}
+  .fr{max-width:calc(58dvh * 16 / 9)}.fr canvas{max-height:58dvh;width:100%;height:auto;object-fit:contain}
+  .cmode .lay{grid-template-columns:minmax(0,1fr)}
+  input,select,textarea{font-size:16px}
+  button:active{transform:none}
+}
