@@ -1,5 +1,5 @@
 // StreamClipper UI. Стан: P (перевірене посилання), CH (канал), cur (поточна задача).
-const UIV='2.19.2';const $=id=>document.getElementById(id);
+const UIV='2.19.3';const $=id=>document.getElementById(id);
 let THFAIL=false,LANG='uk',SET={},P=null,CH=null,cur={},img=null,cam=[0,0,.25,.25],poll=null,WEDIT=false,WLIST=[],NOTIFIED={};
 const st={etm:'lyrics',egrade:'auto',estyle:'auto',ear:'4:3',emode:'normal',sspeed:'auto',mode:'best',layout:'blur',per:'30',typ:'archive',sp:'classic',ss:'m',spos:'auto',sw:'3',slang:'uk'};
 const t=(k,...a)=>{let s=(I18N[LANG]||I18N.uk)[k];if(s===undefined)s=I18N.uk[k]??k;return s.replace(/\{(\d)\}/g,(_,i)=>a[i]??'')};
@@ -51,7 +51,7 @@ async function health(){try{const h=await api('/api/health');SET=h.settings;LANG
 function busy(on){$('pbtn').disabled=on;$('pbtn').textContent=t(on?'opening':'open')}
 async function doProbe(u,live){
   u=u||$('url').value.trim();if(!u)return;$('perr').textContent='';busy(true);
-  try{const r=await api('/api/probe',{url:u,live:!!live});if(r.info.kind==='channel'){CH=r;showChannel()}else showPreview(r)}
+  try{const r=await api('/api/probe',{url:u,live:!!live});if(r.info.kind==='channel'){CH=r;showChannel()}else{showPreview(r);if(typeof saveDraft==='function')saveDraft()}}
   catch(e){$('perr').textContent=e.message}
   busy(false);
 }
@@ -353,26 +353,35 @@ async function syncPoll(){let r;try{r=await api('/api/active')}catch(e){return}
   const ah=run.map(j=>`<button class="ap" onclick="follow('${j.id}')"><i class="spin"></i><b>${esc((j.title||modeName(j.mode)).slice(0,28))}</b><span>${Math.round(j.pct)}%</span>${j.device&&j.device!==DEV?`<em>${esc(devName(j.device))}</em>`:''}</button>`).join('');
   if(ah!==SY.ah){SY.ah=ah;$('act').innerHTML=ah}  // без перемальовування, якщо нічого не змінилось (на iPhone не «тремтить»)
   for(const j of r.jobs){const was=SY.seen[j.id];SY.seen[j.id]=j.state;if(!SY.init)continue;const mine=j.id===cur.job,nm=esc(j.title||modeName(j.mode));
-    if(!was&&['running','review'].includes(j.state)&&!mine&&j.device!==DEV)toast(t('sy_started',devName(j.device),modeName(j.mode),nm),[[t('sy_follow'),()=>follow(j.id)]]);
+    if(!was&&['running','review'].includes(j.state)&&!mine&&j.device!==DEV){
+      const busyHere=cur.job&&['running','review'].includes(SY.seen[cur.job]);
+      if(!busyHere){follow(j.id);toast(t('sy_watch',devName(j.device),modeName(j.mode),nm),[],5000)}  // сам показує процес з іншого пристрою
+      else toast(t('sy_started',devName(j.device),modeName(j.mode),nm),[[t('sy_follow'),()=>follow(j.id)]])}
     if(j.state==='done'&&((was&&['running','review'].includes(was))||(!was&&j.ended&&r.now-j.ended<30&&j.device!==DEV))){notifyB('StreamClipper',t('sy_done',nm));if(!mine||document.hidden)toast(t('sy_done',nm),[[t('sy_open'),()=>follow(j.id)]],14000)}
     if(was&&was!=='error'&&j.state==='error'&&!mine)toast(t('sy_err',nm),[[t('sy_open'),()=>follow(j.id)]])}
+  if(!SY.init){SY.draftTs=0;const lr=run.filter(j=>j.state==='running'||j.state==='review').sort((a,b)=>a.elapsed-b.elapsed)[0];
+    if(lr&&!cur.job){follow(lr.id)}}  // відкрив сайт, а там уже щось робиться — одразу показуємо процес
   SY.init=true;if(r.draft&&r.draft>SY.lastDraft){SY.lastDraft=r.draft;checkDraft()}}
 function draftState(){const vals={};document.querySelectorAll('#p-cut input[id],#p-cut select[id],#p-cut textarea[id]').forEach(e=>{if(e.type==='file')return;vals[e.id]=e.type==='checkbox'?e.checked:e.value});
   const s={...st};delete s.eref;return{url:$('url').value.trim(),purl:P&&P.info?P.info.url:null,st:s,eref:st.eref||null,vals,EM:EM||null,cnt:typeof CNT!=='undefined'?CNT:null}}
-function saveDraft(){if(SY.applying)return;clearTimeout(SY.saveT);SY.saveT=setTimeout(async()=>{try{const r=await api('/api/draft',{state:draftState()});SY.lastDraft=r.ts;SY.draftTs=r.ts;localStorage.setItem('sc_draft_seen',r.ts)}catch(e){}},900)}
+function saveDraft(){if(SY.applying)return;SY.localEdit=Date.now();clearTimeout(SY.saveT);SY.saveT=setTimeout(async()=>{try{const r=await api('/api/draft',{state:draftState()});SY.lastDraft=r.ts;SY.draftTs=r.ts;localStorage.setItem('sc_draft_seen',r.ts)}catch(e){}},900)}
 document.addEventListener('input',e=>{if(e.target.closest('#p-cut'))saveDraft()});document.addEventListener('change',e=>{if(e.target.closest('#p-cut'))saveDraft()});
 document.addEventListener('click',e=>{if(e.target.closest('#p-cut .seg button'))saveDraft()});
-async function checkDraft(){let d;try{d=await api('/api/draft')}catch(e){return}if(!d||!d.ts||d.ts<=SY.draftTs||d.device===DEV)return;
-  const s=d.state||{};if(!s.url&&!s.EM)return;SY.draftTs=d.ts;localStorage.setItem('sc_draft_seen',d.ts);
-  const ago=Math.max(1,Math.round((Date.now()/1000-d.ts)/60));
-  toast(t('sy_draft',devName(d.device),ago)+(s.url?`<div class="tc">${esc(s.url.slice(0,60))}</div>`:''),[[t('sy_take'),()=>applyDraft(s)]],20000)}
-async function applyDraft(s){SY.applying=true;try{
-  if(s.url){$('url').value=s.url;if(!P||!P.info||(s.purl&&P.info.url!==s.purl))await doProbe(s.url)}
+async function checkDraft(){let d;try{d=await api('/api/draft')}catch(e){return}if(!d||!d.ts||d.ts<=SY.draftTs||d.device===DEV||Date.now()/1000-d.ts>6*3600)return;
+  const s=d.state||{};if(!s.url&&!s.EM)return;
+  if(Date.now()-(SY.localEdit||0)<4000){SY.lastDraft=0;return}  // щойно щось міняв тут — не перебиваємо, підхопимо на наступному опитуванні
+  SY.draftTs=d.ts;localStorage.setItem('sc_draft_seen',d.ts);
+  const newSrc=s.purl&&(!P||!P.info||P.info.url!==s.purl);
+  await applyDraft(s,newSrc);
+  if(newSrc)toast(t('sy_opened',devName(d.device))+`<div class="tc">${esc((s.url||'').slice(0,60))}</div>`,[],5000)}
+async function applyDraft(s,newSrc){SY.applying=true;try{
+  if(s.url)$('url').value=s.url;
+  if(s.purl&&(!P||!P.info||P.info.url!==s.purl))await doProbe(s.url)
   Object.assign(st,s.st||{});st.eref=s.eref||null;document.querySelectorAll('.seg[id]').forEach(e=>{if(e.id in st)mark(e.id,e.id)});
   for(const [id,v] of Object.entries(s.vals||{})){const e=$(id);if(!e||e.type==='file')continue;if(e.type==='checkbox')e.checked=!!v;else e.value=v}
   if(s.cnt&&typeof CNT!=='undefined')Object.assign(CNT,s.cnt);
   if(s.EM){EM=s.EM;$('emname').textContent=`${EM.name}${EM.dur?' · '+hms(EM.dur):''}`;loadWave()}
   $('etext').classList.toggle('hide',st.etm!=='custom');if(st.eref)$('erefn').textContent=t('e_ref_ok',st.eref.shot_len,t('es_'+st.eref.style),t('g_'+st.eref.grade));
-  modeUI();plan();tab('cut')}catch(e){alert(e.message)}finally{SY.applying=false}}
+  modeUI();plan();if(newSrc&&!(cur.job&&SY.seen[cur.job]==='running'))tab('cut')}catch(e){console.log(e)}finally{SY.applying=false}}
 setInterval(()=>{if(!document.hidden)syncPoll()},2500);syncPoll();
 document.addEventListener('visibilitychange',()=>{if(!document.hidden){syncPoll();checkDraft()}});
