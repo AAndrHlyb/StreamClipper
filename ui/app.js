@@ -1,10 +1,11 @@
 // StreamClipper UI. Стан: P (перевірене посилання), CH (канал), cur (поточна задача).
-const UIV='2.18.2';const $=id=>document.getElementById(id);
+const UIV='2.19.0';const $=id=>document.getElementById(id);
 let THFAIL=false,LANG='uk',SET={},P=null,CH=null,cur={},img=null,cam=[0,0,.25,.25],poll=null,WEDIT=false,WLIST=[],NOTIFIED={};
 const st={etm:'lyrics',egrade:'auto',estyle:'auto',ear:'4:3',emode:'normal',sspeed:'auto',mode:'best',layout:'blur',per:'30',typ:'archive',sp:'classic',ss:'m',spos:'auto',sw:'3',slang:'uk'};
 const t=(k,...a)=>{let s=(I18N[LANG]||I18N.uk)[k];if(s===undefined)s=I18N.uk[k]??k;return s.replace(/\{(\d)\}/g,(_,i)=>a[i]??'')};
 const ic=n=>`<svg class="i"><use href="#${n}"/></svg>`;
-async function api(u,b){const r=await fetch(u,b===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});const j=await r.json();if(!r.ok||j.error)throw new Error(t(j.error)||j.error||r.status);return j}
+const DEV=/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)?'phone':'pc';
+async function api(u,b){const r=await fetch(u,b===undefined?{headers:{'X-Device':DEV}}:{method:'POST',headers:{'Content-Type':'application/json','X-Device':DEV},body:JSON.stringify(b)});const j=await r.json();if(!r.ok||j.error)throw new Error(t(j.error)||j.error||r.status);return j}
 const fileUrl=(p,dl)=>'/file?p='+encodeURIComponent(p)+(dl?'&dl=1':'');
 const thumbUrl=u=>u?'/thumb?u='+encodeURIComponent(u):'';
 const hms=s=>{s=Math.round(s||0);const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return h+':'+String(m).padStart(2,'0')+':'+String(x).padStart(2,'0')};
@@ -334,3 +335,42 @@ function reuseOpts(){const o=EOPTS;if(!o)return;st.mode='edit';mark('mode','mode
   if(o.music){EM={path:o.music,name:o.music.split(/[\\/]/).pop().replace(/^[0-9a-f]{6}_/,''),dur:0};$('emname').textContent=EM.name;$('emstart').value=o._music_start??o.music_start??'';loadWave()}
   $('eurls').value=(o.edit_extra_urls||[]).join('\n');st.eref=o.edit_ref||null;$('erefn').textContent=st.eref?t('e_ref_ok',st.eref.shot_len,t('es_'+st.eref.style),t('g_'+st.eref.grade)):'';
   modeUI();plan();tab('cut');window.scrollTo({top:0,behavior:'smooth'})}
+
+// ---------------- 2.19: синхронізація ПК ↔ телефон: панель активності, сповіщення, підхоплення налаштувань
+const SY={seen:{},init:false,draftTs:+(localStorage.getItem('sc_draft_seen')||0),applying:false,saveT:0,lastDraft:0};
+const devName=d=>t(d==='phone'?'sy_phone':d==='pc'?'sy_pc':'sy_queue');
+const modeName=m=>t({edit:'m_edit',best:'m_best',seq:'m_seq',compile:'m_compile',teaser:'m_teaser',reedit:'sy_reedit',rerender:'sy_rerender'}[m]||'m_best');
+function toast(html,acts,ms){const box=$('toasts');const d=document.createElement('div');d.className='toast';d.innerHTML=`<div class="tx">${html}</div>`;
+  const row=document.createElement('div');row.className='ta';(acts||[]).forEach(([lbl,fn])=>{const b=document.createElement('button');b.className='ghost';b.textContent=lbl;b.onclick=()=>{fn();d.remove()};row.appendChild(b)});
+  const x=document.createElement('button');x.className='ghost ic';x.innerHTML=ic('x');x.onclick=()=>d.remove();row.appendChild(x);d.appendChild(row);box.appendChild(d);
+  if(DEV==='phone'&&navigator.vibrate)try{navigator.vibrate(60)}catch(e){}
+  setTimeout(()=>d.classList.add('gone'),(ms||9000));setTimeout(()=>d.remove(),(ms||9000)+400)}
+function follow(id){tab('cut');$('s3').classList.remove('hide');['s4','srv','after','compbox'].forEach(x=>$(x).classList.add('hide'));$('res').innerHTML='';$('jerr').textContent='';track(id);$('s3').scrollIntoView({behavior:'smooth',block:'start'})}
+async function syncPoll(){let r;try{r=await api('/api/active')}catch(e){return}
+  const run=r.jobs.filter(j=>['running','review'].includes(j.state));
+  $('act').classList.toggle('hide',!run.length);
+  $('act').innerHTML=run.map(j=>`<button class="ap" onclick="follow('${j.id}')"><i class="spin"></i><b>${esc((j.title||modeName(j.mode)).slice(0,28))}</b><span>${Math.round(j.pct)}%</span>${j.device&&j.device!==DEV?`<em>${esc(devName(j.device))}</em>`:''}</button>`).join('');
+  for(const j of r.jobs){const was=SY.seen[j.id];SY.seen[j.id]=j.state;if(!SY.init)continue;const mine=j.id===cur.job,nm=esc(j.title||modeName(j.mode));
+    if(!was&&['running','review'].includes(j.state)&&!mine&&j.device!==DEV)toast(t('sy_started',devName(j.device),modeName(j.mode),nm),[[t('sy_follow'),()=>follow(j.id)]]);
+    if(j.state==='done'&&((was&&['running','review'].includes(was))||(!was&&j.ended&&r.now-j.ended<30&&j.device!==DEV))){notifyB('StreamClipper',t('sy_done',nm));if(!mine||document.hidden)toast(t('sy_done',nm),[[t('sy_open'),()=>follow(j.id)]],14000)}
+    if(was&&was!=='error'&&j.state==='error'&&!mine)toast(t('sy_err',nm),[[t('sy_open'),()=>follow(j.id)]])}
+  SY.init=true;if(r.draft&&r.draft>SY.lastDraft){SY.lastDraft=r.draft;checkDraft()}}
+function draftState(){const vals={};document.querySelectorAll('#p-cut input[id],#p-cut select[id],#p-cut textarea[id]').forEach(e=>{if(e.type==='file')return;vals[e.id]=e.type==='checkbox'?e.checked:e.value});
+  const s={...st};delete s.eref;return{url:$('url').value.trim(),purl:P&&P.info?P.info.url:null,st:s,eref:st.eref||null,vals,EM:EM||null,cnt:typeof CNT!=='undefined'?CNT:null}}
+function saveDraft(){if(SY.applying)return;clearTimeout(SY.saveT);SY.saveT=setTimeout(async()=>{try{const r=await api('/api/draft',{state:draftState()});SY.lastDraft=r.ts;SY.draftTs=r.ts;localStorage.setItem('sc_draft_seen',r.ts)}catch(e){}},900)}
+document.addEventListener('input',e=>{if(e.target.closest('#p-cut'))saveDraft()});document.addEventListener('change',e=>{if(e.target.closest('#p-cut'))saveDraft()});
+document.addEventListener('click',e=>{if(e.target.closest('#p-cut .seg button'))saveDraft()});
+async function checkDraft(){let d;try{d=await api('/api/draft')}catch(e){return}if(!d||!d.ts||d.ts<=SY.draftTs||d.device===DEV)return;
+  const s=d.state||{};if(!s.url&&!s.EM)return;SY.draftTs=d.ts;localStorage.setItem('sc_draft_seen',d.ts);
+  const ago=Math.max(1,Math.round((Date.now()/1000-d.ts)/60));
+  toast(t('sy_draft',devName(d.device),ago)+(s.url?`<div class="tc">${esc(s.url.slice(0,60))}</div>`:''),[[t('sy_take'),()=>applyDraft(s)]],20000)}
+async function applyDraft(s){SY.applying=true;try{
+  if(s.url){$('url').value=s.url;if(!P||!P.info||(s.purl&&P.info.url!==s.purl))await doProbe(s.url)}
+  Object.assign(st,s.st||{});st.eref=s.eref||null;document.querySelectorAll('.seg[id]').forEach(e=>{if(e.id in st)mark(e.id,e.id)});
+  for(const [id,v] of Object.entries(s.vals||{})){const e=$(id);if(!e||e.type==='file')continue;if(e.type==='checkbox')e.checked=!!v;else e.value=v}
+  if(s.cnt&&typeof CNT!=='undefined')Object.assign(CNT,s.cnt);
+  if(s.EM){EM=s.EM;$('emname').textContent=`${EM.name}${EM.dur?' · '+hms(EM.dur):''}`;loadWave()}
+  $('etext').classList.toggle('hide',st.etm!=='custom');if(st.eref)$('erefn').textContent=t('e_ref_ok',st.eref.shot_len,t('es_'+st.eref.style),t('g_'+st.eref.grade));
+  modeUI();plan();tab('cut')}catch(e){alert(e.message)}finally{SY.applying=false}}
+setInterval(()=>{if(!document.hidden)syncPoll()},2500);syncPoll();
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){syncPoll();checkDraft()}});

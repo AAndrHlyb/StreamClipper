@@ -10,6 +10,17 @@ from sc.watcher import Queue, Watcher
 PORT = int(os.environ.get("SC_PORT", "8765"))
 UI = C.APP_DIR / "ui" / "index.html"
 JOBS, INFOS, WATCH_JOBS = {}, {}, {}
+SYNC = {"draft": None, "end": {}}  # синхронізація між ПК і телефоном: чернетка налаштувань + коли завершились задачі
+
+
+def job_brief(j):
+    """Коротко про задачу — для панелі активності на всіх пристроях."""
+    if j.state not in ("running", "review"): SYNC["end"].setdefault(j.id, time.time())
+    o = j.opts or {}
+    return {"id": j.id, "state": j.state, "stage": j.stage, "args": j.args, "pct": round(j.pct, 1), "sub": j.sub, "err": j.err,
+            "mode": j.extra.get("kind") or o.get("mode") or "", "title": j.extra.get("title") or (j.info or {}).get("title") or "",
+            "device": j.extra.get("device", ""), "dir": str(j.dir or ""), "edit": j.extra.get("edit"), "n": len(j.results or []),
+            "elapsed": int(time.time() - j.t0), "ended": SYNC["end"].get(j.id)}
 
 
 def start_job(url, opts, info=None, kind="clip", watch_key=None):
@@ -196,6 +207,12 @@ class H(BaseHTTPRequestHandler):
             if u.path in ("/", "/index.html"):
                 extra = {"Set-Cookie": f"sc_t={q['t'][0]}; Path=/; SameSite=Strict; Max-Age=31536000"} if q.get("t") else None
                 return self.send(200, UI.read_bytes(), "text/html; charset=utf-8", extra)
+            if u.path == "/manifest.webmanifest":  # «На головний екран» телефона: відкривається як застосунок, з токеном
+                tok = C.settings().get("token") or ""
+                man = {"name": "StreamClipper", "short_name": "Clipper", "start_url": f"/?t={tok}" if tok else "/", "display": "standalone",
+                       "background_color": "#0f0f10", "theme_color": "#0f0f10",
+                       "icons": [{"src": "/favicon.ico", "sizes": "any", "type": "image/svg+xml", "purpose": "any"}]}
+                return self.send(200, json.dumps(man).encode(), "application/manifest+json")
             if u.path == "/favicon.ico":
                 return self.send(200, FAVICON, "image/svg+xml", {"Cache-Control": "max-age=86400"})
             if u.path == "/font":
@@ -215,6 +232,11 @@ class H(BaseHTTPRequestHandler):
             if u.path.startswith("/api/job/"):
                 j = JOBS.get(u.path.rsplit("/", 1)[-1])
                 return self.send(200, j.view()) if j else self.send(404, {"error": "no job"})
+            if u.path == "/api/active":  # що зараз робиться (і що закінчилось за останню годину) — на всіх пристроях однаково
+                now = time.time(); L = [job_brief(j) for j in list(JOBS.values())]
+                return self.send(200, {"jobs": [x for x in L if x["state"] in ("running", "review") or now - (x["ended"] or now) < 3600],
+                                       "draft": (SYNC["draft"] or {}).get("ts"), "now": now})
+            if u.path == "/api/draft": return self.send(200, SYNC["draft"] or {})
             if u.path == "/api/jobs":
                 return self.send(200, [j.view() for j in JOBS.values() if j.state in ("running", "review")])
             if u.path == "/api/library": return self.send(200, library())
@@ -327,6 +349,7 @@ class H(BaseHTTPRequestHandler):
                 info = INFOS.get(b.get("pid"))
                 o = b.get("opts") or {}
                 j = start_job(b.get("url") or (info or {}).get("url"), o, info)
+                j.extra["device"] = self.headers.get("X-Device") or ""
                 return self.send(200, {"job": j.id})
             if p in ("/api/cancel", "/api/stop"):
                 j = JOBS.get(b["job"])
@@ -340,6 +363,7 @@ class H(BaseHTTPRequestHandler):
             if p == "/api/rerender":
                 if not allowed(b["dir"]): return self.send(403, {"error": "forbidden"})
                 jid = uuid.uuid4().hex[:8]; j = P.Job(jid, "", {}); JOBS[jid] = j
+                j.extra.update(device=self.headers.get("X-Device") or "", kind="rerender", title=b.get("title") or Path(b["dir"]).name)
 
                 def go():
                     try:
@@ -352,6 +376,8 @@ class H(BaseHTTPRequestHandler):
             if p == "/api/reedit":
                 if not allowed(b["dir"]): return self.send(403, {"error": "forbidden"})
                 jid = uuid.uuid4().hex[:8]; j = P.Job(jid, "", {}); JOBS[jid] = j
+                j.extra.update(device=self.headers.get("X-Device") or "", kind="reedit",
+                               title=(C.jload(Path(b["dir"]) / "meta.json", {}) or {}).get("info", {}).get("title") or Path(b["dir"]).name)
 
                 def go2():
                     try:
@@ -361,6 +387,9 @@ class H(BaseHTTPRequestHandler):
                         j.state, j.err = "error", str(e)
                 threading.Thread(target=go2, daemon=True).start()
                 return self.send(200, {"job": jid})
+            if p == "/api/draft":  # чернетка форми: що налаштовано на одному пристрої — можна підхопити на іншому
+                SYNC["draft"] = {"ts": time.time(), "device": self.headers.get("X-Device") or "", "state": b.get("state") or {}}
+                return self.send(200, {"ok": True, "ts": SYNC["draft"]["ts"]})
             if p == "/api/wave":  # хвиля треку для вибору відрізка + підказки (найсильніший шматок, дроп)
                 if not allowed(b["path"]): return self.send(403, {"error": "forbidden"})
                 from sc import edit as E
